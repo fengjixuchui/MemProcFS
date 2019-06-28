@@ -9,10 +9,13 @@
 #
 # https://github.com/ufrisk/
 #
-# (c) Ulf Frisk, 2018
+# (c) Ulf Frisk, 2018-2019
 # Author: Ulf Frisk, pcileech@frizk.net
 #
+# Header Version: 2.7
+#
 
+import atexit
 from vmmpyc import *
 
 #------------------------------------------------------------------------------
@@ -27,14 +30,24 @@ VMMPY_STATUS_UNSUCCESSFUL =             0xC0000001
 VMMPY_STATUS_END_OF_FILE =              0xC0000011
 VMMPY_STATUS_FILE_INVALID =             0xC0000098
 
-# TARGET SYSTEM values - used to determine if a plugin is supported or not for
+# SYSTEM values - used to determine if a plugin is supported or not for
 # the current system that is being analyzed.
-VMMPY_TARGET_UNKNOWN_X64 =              0x0001
-VMMPY_TARGET_WINDOWS_X64 =              0x0002
+VMMPY_SYSTEM_UNKNOWN_X64 =              0x0001
+VMMPY_SYSTEM_WINDOWS_X64 =              0x0002
+VMMPY_SYSTEM_UNKNOWN_X86 =              0x0003
+VMMPY_SYSTEM_WINDOWS_X86 =              0x0004
+
+# MEMORYMODEL values - used to determine if a plugin is supported or not
+# for a specific memory model.
+VMMPY_MEMORYMODEL_NA =                  0x0000
+VMMPY_MEMORYMODEL_X86 =                 0x0001
+VMMPY_MEMORYMODEL_X86PAE =              0x0002
+VMMPY_MEMORYMODEL_X64 =                 0x0003
 
 # EVENT values - received by the notify callback function for specific events
 # occuring in the native plugin manager / vmm / memory process file system.
 VMMPY_PLUGIN_EVENT_VERBOSITYCHANGE =    0x01
+VMMPY_PLUGIN_EVENT_TOTALREFRESH =       0x02
 
 #------------------------------------------------------------------------------
 # VmmPy INITIALIZATION FUNCTIONALITY BELOW:
@@ -47,32 +60,30 @@ def VmmPy_Close():
     N/A
     
     Example:
-    VmmPy_Close() --> True
+    VmmPy_Close()
     """
+    atexit.unregister(VmmPy_Close)
     VMMPYC_Close()
 
 
 
-def VmmPy_InternalInitializeReserved(args, is_printf = True, is_verbose = False, is_verbose_extra = False, is_verbose_tlp = False, page_table_base = 0):
-    """INTERNAL USE ONLY - DO NOT CALL DIRECTLY!
+def VmmPy_Refresh():
+    """Force refresh the internal state of the VMM.DLL - refreshing process listings and internal caches. NB! function may take a long time to execute!
+
+    Keyword arguments:
+    N/A
+    
+    Example:
+    VmmPy_Refresh()
     """
-    if page_table_base > 0:
-        args.append("-cr3")
-        args.append(str(page_table_base))
-    if is_printf:
-        args.append("-vdll")
-    if is_verbose:
-        args.append("-v")
-    if is_verbose_extra:
-        args.append("-vv")
-    if is_verbose_tlp:
-        args.append("-vvv")
-    VMMPYC_InitializeReserved(args)
+    VMMPYC_Refresh(0)
 
 
 
-def VmmPy_InitializeFile(file_name, is_printf = True, is_verbose = False, is_verbose_extra = False, is_verbose_tlp = False, page_table_base = 0):
-    """Initialize VmmPy and the Virtual Memory Manager VMM.DLL from a memory dump file.
+def VmmPy_Initialize(args, is_printf = True, is_verbose = False, is_verbose_extra = False, is_verbose_tlp = False, page_table_base = 0):
+    """Initialize VmmPy and the Virtual Memory Manager VMM.DLL with arguments as
+       in the argument list args. Important is the -device option and optionally
+       -remote option as closer described in the MemProcFS and LeechCore projects.
 
     Keyword arguments:
     file_name -- str: memory dump file to load.
@@ -83,50 +94,22 @@ def VmmPy_InitializeFile(file_name, is_printf = True, is_verbose = False, is_ver
     page_table_base -- int: optional page directory base of the OS kernel or a x64 process.
     
     Example:
-    VmmPy_InitializeFile("c:\\temp\\dump.raw")
+    VmmPy_Initialize(['c:\\temp\\dump.raw'])
+    VmmPy_Initialize(['-device', 'dumpit','-remote', 'rpc://insecure:remote.example.com'])
     """
-    args = ["", "-device", file_name]
-    VmmPy_InternalInitializeReserved(args, is_printf, is_verbose, is_verbose_extra, is_verbose_tlp, page_table_base)
-
-
-
-def VmmPy_InitializeTotalMeltdown(is_printf = True, is_verbose = False, is_verbose_extra = False, is_verbose_tlp = False, page_table_base = 0):
-    """Initialize VmmPy and the Virtual Memory Manager VMM.DLL from the "Total Meltdown" CVE-2018-1038 vulnerability.
-    NB! Read/Write mode will be enabled.
-    NB! Required a linked pcileech.dll
-
-    Keyword arguments:
-    is_printf -- bool: console output from vmm.dll is enabled.
-    is_verbose -- bool: verbose level.
-    is_verbose_extra -- bool: extra verbose level.
-    is_verbose_tlp -- bool: show FPGA TLPs or similar - super verbose!
-    page_table_base -- int: optional page directory base of the OS kernel or a x64 process.
-    
-    Example:
-    VmmPy_InitializeFile("c:\\temp\\dump.raw")
-    """
-    args = ["", "-device", "totalmeltdown"]
-    VmmPy_InternalInitializeReserved(args, is_printf, is_verbose, is_verbose_extra, is_verbose_tlp, page_table_base)
-
-
-
-def VmmPy_InitializeFPGA(is_printf = True, is_verbose = False, is_verbose_extra = False, is_verbose_tlp = False, page_table_base = 0):
-    """Initialize VmmPy and the Virtual Memory Manager VMM.DLL from a supported FPGA device over USB.
-    NB! Read/Write mode will be enabled.
-    NB! Required a linked pcileech.dll
-
-    Keyword arguments:
-    is_printf -- bool: console output from vmm.dll is enabled.
-    is_verbose -- bool: verbose level.
-    is_verbose_extra -- bool: extra verbose level.
-    is_verbose_tlp -- bool: show FPGA TLPs or similar - super verbose!
-    page_table_base -- int: optional page directory base of the OS kernel or a x64 process.
-    
-    Example:
-    VmmPy_InitializeFile("c:\\temp\\dump.raw")
-    """
-    args = ["", "-device", "fpga"]
-    VmmPy_InternalInitializeReserved(args, is_printf, is_verbose, is_verbose_extra, is_verbose_tlp, page_table_base)
+    if page_table_base > 0:
+        args.append("-cr3")
+        args.append(str(page_table_base))
+    if is_printf:
+        args.append("-printf")
+    if is_verbose:
+        args.append("-v")
+    if is_verbose_extra:
+        args.append("-vv")
+    if is_verbose_tlp:
+        args.append("-vvv")
+    VMMPYC_Initialize(args)
+    atexit.register(VmmPy_Close)
 
 
 
@@ -134,27 +117,14 @@ def VmmPy_InitializeFPGA(is_printf = True, is_verbose = False, is_verbose_extra 
 # VmmPy CONFIGURATION FUNCTIONALITY BELOW:
 #------------------------------------------------------------------------------
 
-VMMPY_OPT_DEVICE_FPGA_PROBE_MAXPAGES          = 0x01        # RW
-VMMPY_OPT_DEVICE_FPGA_RX_FLUSH_LIMIT          = 0x02        # RW
-VMMPY_OPT_DEVICE_FPGA_MAX_SIZE_RX             = 0x03        # RW
-VMMPY_OPT_DEVICE_FPGA_MAX_SIZE_TX             = 0x04        # RW
-VMMPY_OPT_DEVICE_FPGA_DELAY_PROBE_READ        = 0x05        # RW - uS
-VMMPY_OPT_DEVICE_FPGA_DELAY_PROBE_WRITE       = 0x06        # RW - uS
-VMMPY_OPT_DEVICE_FPGA_DELAY_WRITE             = 0x07        # RW - uS
-VMMPY_OPT_DEVICE_FPGA_DELAY_READ              = 0x08        # RW - uS
-VMMPY_OPT_DEVICE_FPGA_RETRY_ON_ERROR          = 0x09        # RW
-VMMPY_OPT_DEVICE_FPGA_DEVICE_ID               = 0x80        # R
-VMMPY_OPT_DEVICE_FPGA_FPGA_ID                 = 0x81        # R
-VMMPY_OPT_DEVICE_FPGA_VERSION_MAJOR           = 0x82        # R
-VMMPY_OPT_DEVICE_FPGA_VERSION_MINOR           = 0x83        # R
-
 VMMPY_OPT_CORE_PRINTF_ENABLE                  = 0x80000001  # RW
 VMMPY_OPT_CORE_VERBOSE                        = 0x80000002  # RW
 VMMPY_OPT_CORE_VERBOSE_EXTRA                  = 0x80000003  # RW
 VMMPY_OPT_CORE_VERBOSE_EXTRA_TLP              = 0x80000004  # RW
 VMMPY_OPT_CORE_MAX_NATIVE_ADDRESS             = 0x80000005  # R
 VMMPY_OPT_CORE_MAX_NATIVE_IOSIZE              = 0x80000006  # R
-VMMPY_OPT_CORE_TARGET_SYSTEM                  = 0x80000007  # R
+VMMPY_OPT_CORE_SYSTEM                         = 0x80000007  # R
+VMMPY_OPT_CORE_MEMORYMODEL                    = 0x80000008  # R
 
 VMMPY_OPT_CONFIG_IS_REFRESH_ENABLED           = 0x40000001  # R - 1/0
 VMMPY_OPT_CONFIG_TICK_PERIOD                  = 0x40000002  # RW - base tick period in ms
@@ -215,6 +185,7 @@ def VmmPy_GetVersion():
 
 VMMPY_FLAG_NOCACHE           = 0x0001      # do not use the data cache (force reading from memory acquisition device)
 VMMPY_FLAG_ZEROPAD_ON_FAIL   = 0x0002      # zero pad failed physical memory reads and report success if read within range of physical memory.
+VMMPY_FLAG_FORCECACHE_READ   = 0x0008      # force use of cache - fail non-cached pages - only valid for reads, invalid with VMM_FLAG_NOCACHE/VMM_FLAG_ZEROPAD_ON_FAIL.
 
 
 
@@ -383,7 +354,7 @@ def VmmPy_ProcessGetInformation(pid):
     return -- dict: of process information.
     
     Example:
-    VmmPy_ProcessGetInformation(332) --> {'pid': 8796, 'pa-pml4': 5798625280, 'pa-pml4-user': 6237978624, 'state': 0, 'target': 2, 'usermode': True, 'name': 'cmd.exe', 'wow64': False, 'va-entry': 140700131683072, 'va-eprocess': 18446635809067693440, 'va-peb': 708313505792, 'va-peb32': 0}
+    VmmPy_ProcessGetInformation(332) --> {'pid': 8796, 'pa-dtb': 5798625280, 'pa-dtb-user': 6237978624, 'state': 0, 'tp-system': 2, 'usermode': True, 'name': 'cmd.exe', 'name-long': 'cmd.exe', 'wow64': False, 'va-entry': 140700131683072, 'va-eprocess': 18446635809067693440, 'va-peb': 708313505792, 'va-peb32': 0, 'path-kernel': '', 'path-user': '', 'cmdline': ''}
     """
     return VMMPYC_ProcessGetInformation(pid)
 
@@ -396,7 +367,7 @@ def VmmPy_ProcessListInformation():
     return -- dict: dict of process information with pid as key.
     
     Example:
-    VmmPy_ProcessListInformation() --> {4: {...}, ..., 322: {'pid': 8796, 'pa-pml4': 5798625280, 'pa-pml4-user': 6237978624, 'state': 0, 'target': 2, 'usermode': True, 'name': 'cmd.exe', 'wow64': False, 'va-entry': 140700131683072, 'va-eprocess': 18446635809067693440, 'va-peb': 708313505792, 'va-peb32': 0}
+    VmmPy_ProcessListInformation() --> {4: {...}, ..., 322: {'pid': 8796, 'ppid': 456, 'pa-dtb': 5798625280, 'pa-dtb-user': 6237978624, 'state': 0, 'tp-system': 2, 'usermode': True, 'name': 'cmd.exe', 'wow64': False, 'va-entry': 140700131683072, 'va-eprocess': 18446635809067693440, 'va-peb': 708313505792, 'va-peb32': 0}
     """
     pids = VmmPy_PidList()
     result = {}
@@ -471,8 +442,77 @@ def VmmPy_ProcessGetSections(pid, module_name):
 
 
 #------------------------------------------------------------------------------
+# VmmPy Windows Registry FUNCTIONALITY BELOW:
+#------------------------------------------------------------------------------
+
+def VmmPy_WinReg_HiveList():
+    """Retrieve all registry hives and and return as list of dict.
+
+    Keyword arguments:
+    return -- list: of dict of registry hive information.
+    
+    Example:
+    VmmPy_WinReg_HiveList() --> [{'i': 0, 'va_hive': 18446631989106032640, 'va_baseblock': 18446631989106098176, 'name': '0xffff9a0f4505c000-SYSTEM-MACHINE_SYSTEM.reghive'},  ... ]
+    """
+    return VMMPYC_WinReg_HiveList()
+
+
+
+def VmmPy_WinReg_HiveRead(va_hive, address, length, flags = 0):
+    """Read from a registry hive raw memory space.
+    Note! The BaseBlock/regf header is not included in the memory space.
+
+    Keyword arguments:
+    va_hive -- int: the virtual address of the registry hive to write to.
+    address -- int: the raw registry address to read.
+    length -- int: the number of bytes to read.
+    flags -- int: optional flags as specified by VMMPY_FLAG* constants.
+    return -- bytes: memory.
+    
+    Example:
+    VmmPy_MemRead(0xfffff800acb0000, 0x1000, 4) --> b'hbin'
+    """
+    return VMMPYC_WinReg_HiveRead(va_hive, address, length, flags)
+
+
+
+def VmmPy_WinReg_HiveWrite(va_hive, address, bytes_data):
+    """Write to a registry hive raw memory space.
+    Note! The BaseBlock/regf header is not included in the memory space.
+
+    Keyword arguments:
+    va_hive -- int: the virtual address of the registry hive to write to.
+    address -- int: the raw registry address to write to.
+    bytes_data -- bytes: a bytes-like object.
+    
+    Example:
+    VmmPy_WinReg_HiveWrite(0xfffff800acb0000, 0x1000, b'\x00\x01\x02\x03')
+    """
+    VMMPYC_WinReg_HiveWrite(va_hive, address, bytes_data)
+
+
+
+#------------------------------------------------------------------------------
+# VmmPy NETWORK FUNCTIONALITY BELOW:
+#------------------------------------------------------------------------------
+
+def VmmPy_WinNet_Get():
+    """Retrieve networking information
+
+    Keyword arguments:
+    return -- dict with 'TcpE' list with dict for each TCP connection.
+    
+    Example:
+    VmmPy_WinReg_HiveList() --> {'TcpE': [{'ver': 4, 'pid': 612, 'state': 4, 'va': 18446690201099026448, 'time': 131983383869225588, 'time-str': '2019-03-29 13:06:26 UTC', 'src-ip': '127.0.0.1', 'src-port': 51734, 'dst-ip': '127.0.0.1', 'dst-port': 51733}, ...]}
+    """
+    return VMMPYC_WinNet_Get()
+
+
+
+#------------------------------------------------------------------------------
 # VmmPy VFS (Virtual File System) FUNCTIONALITY BELOW:
 #------------------------------------------------------------------------------
+
 def VmmPy_VfsList(path):
     """Retrieve a Virtual File System directory listing a path and return it.
 
@@ -518,6 +558,59 @@ def VmmPy_VfsWrite(path_file, bytes_data, offset = 0):
     """
     path_file = path_file.replace('/', '\\')
     VmmPy_VfsWrite(path_file, bytes_data, offset)
+
+
+
+#------------------------------------------------------------------------------
+# VmmPy WINDOWS ONLY FUNCTIONALITY BELOW:
+#------------------------------------------------------------------------------
+
+def VmmPy_WinGetThunkInfoEAT(pid, module_name, exported_function):
+    """Retrieve information about a single export address table (EAT) entry. This may be useful for hooking.
+
+    Keyword arguments:
+    pid -- int: the process identifier (pid) when reading process virtual memory.
+    module_name -- str: name of the module to retrieve.
+    exported_function -- str: name of the exported function to retrieve.
+    return -- dict: information about the EAT entry.
+
+    Example:
+    VmmPy_WinGetThunkInfoEAT(4, 'ntoskrnl.exe', 'KeGetCurrentIrql') --> {'vaFunction': 18446735288139539584, 'valueThunk': 1479808, 'vaNameFunction': 18446735288147899428, 'vaThunk': 18446735288147849312}
+    """
+    return VMMPYC_WinGetThunkInfoEAT(pid, module_name, exported_function)
+
+
+
+def VmmPy_WinGetThunkInfoIAT(pid, module_name, imported_module_name, imported_module_function):
+    """Retrieve information about a single import address table (IAT) entry. This may be useful for hooking.
+
+    Keyword arguments:
+    pid -- int: the process identifier (pid) when reading process virtual memory.
+    module_name -- str: name of the module to retrieve.
+    imported_module_name -- str: name of the imported module to retrieve.
+    imported_module_function -- str: name of the imported function to retrieve.
+    return -- dict: information about the IAT entry.
+
+    Example:
+    VmmPy_WinGetThunkInfoIAT(4, 'ntoskrnl.exe', 'hal.dll', 'HalSendNMI') --> {'32': False, 'vaFunction': 18446735288149190896, 'vaNameFunction': 18446735288143568050, 'vaNameModule': 18446735288143568362, 'vaThunk': 18446735288143561136}
+    """
+    return VMMPYC_WinGetThunkInfoIAT(pid, module_name, imported_module_name, imported_module_function)
+
+
+
+def VmmPy_WinDecompressPage(va_compressed, len_compressed = 0):
+    """Decompress a page stored in the MemCompression process in Windows 10.
+
+    Keyword arguments:
+    va_compressed -- int: the virtual address inside 'MemCompression' where the compressed buffer starts.
+    len_compressed -- int: optional length of the compressed buffer (leave out for auto-detect).
+    return -- dict: containing decompressed data and size of compressed buffer.
+
+    Example:
+    VmmPy_WinDecompressPage(0x00000210bfb40000) --> {'c': 456, 'b': b'...'}
+    """
+    return VMMPYC_WinMemCompression_DecompressPage(va_compressed, len_compressed)
+
 
 
 #------------------------------------------------------------------------------

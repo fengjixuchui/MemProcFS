@@ -1,6 +1,6 @@
 // vfs.h : definitions related to virtual file system support.
 //
-// (c) Ulf Frisk, 2018
+// (c) Ulf Frisk, 2018-2019
 // Author: Ulf Frisk, pcileech@frizk.net
 //
 #ifndef __VFS_H__
@@ -14,7 +14,7 @@ typedef unsigned __int64                QWORD, *PQWORD;
 #define VMMVFS_CACHE_DIRECTORY_LIFETIME_PROC_MS 500
 
 typedef struct tdVMMDLL_FUNCTIONS {
-    BOOL(*InitializeReserved)(_In_ DWORD argc, _In_ LPSTR argv[]);
+    BOOL(*Initialize)(_In_ DWORD argc, _In_ LPSTR argv[]);
     BOOL(*VfsList)(_In_ LPCWSTR wcsPath, _Inout_ PVMMDLL_VFS_FILELIST pFileList);
     DWORD(*VfsRead)(LPCWSTR wcsFileName, _Out_ LPVOID pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ ULONG64 cbOffset);
     DWORD(*VfsWrite)(_In_ LPCWSTR wcsFileName, _In_ LPVOID pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ ULONG64 cbOffset);
@@ -54,7 +54,8 @@ VOID VfsInitializeAndMount(_In_ CHAR chMountPoint, _In_ PVMMDLL_FUNCTIONS pVmmDl
 
 /*
 * Close a vfs sub-context in ctxVfs - if exists.
+* -- chMountPoint
 */
-VOID VfsClose();
+VOID VfsClose(_In_ CHAR chMountPoint);
 
 #endif /* __VFS_H__ */

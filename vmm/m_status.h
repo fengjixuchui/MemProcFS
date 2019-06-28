@@ -1,6 +1,6 @@
 // m_status.h : definitions related to the .status built-in module.
 //
-// (c) Ulf Frisk, 2018
+// (c) Ulf Frisk, 2018-2019
 // Author: Ulf Frisk, pcileech@frizk.net
 //
 #ifndef __M_STATUS_H__
@@ -9,7 +9,7 @@
 #include "vmmdll.h"
 
 /*
-* Initialization function for the built-in virt2phys module.
+* Initialization function for the built-in status module.
 * -- pPluginRegInfo
 */
 VOID M_Status_Initialize(_Inout_ PVMMDLL_PLUGIN_REGINFO pPluginRegInfo);

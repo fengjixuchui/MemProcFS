@@ -1,11 +1,16 @@
 // util.h : definitions of various utility functions.
 //
-// (c) Ulf Frisk, 2018
+// (c) Ulf Frisk, 2018-2019
 // Author: Ulf Frisk, pcileech@frizk.net
 //
 #ifndef __UTIL_H__
 #define __UTIL_H__
 #include "vmm.h"
+
+/*
+* Calculate the number of digits of an integer number.
+*/
+DWORD Util_GetNumDigits(_In_ DWORD dwNumber);
 
 /*
 * Parse a string returning the QWORD representing the string. The string may
@@ -32,7 +37,15 @@ VOID Util_PrintHexAscii(_In_ PBYTE pb, _In_ DWORD cb, _In_ DWORD cbInitialOffset
 * -- sz = buffer to fill, NULL to retrieve size in pcsz parameter.
 * -- pcsz = ptr to size of buffer on entry, size of characters on exit.
 */
-BOOL Util_FillHexAscii(_In_ PBYTE pb, _In_ DWORD cb, _In_ DWORD cbInitialOffset, _Inout_opt_ LPSTR sz, _Inout_ PDWORD pcsz);
+BOOL Util_FillHexAscii(_In_ PBYTE pb, _In_ DWORD cb, _In_ DWORD cbInitialOffset, _Inout_opt_ LPSTR sz, _Out_ PDWORD pcsz);
+
+/*
+* Replaces ascii characters not allowed in file names in the NULL-terminated
+* string sz.
+* -- sz
+* -- chDefault
+*/
+VOID Util_AsciiFileNameFix(_In_ LPSTR sz, _In_ CHAR chDefault);
 
 /*
 * Split a "path" string into two at the first '\' character. If no 2nd string
@@ -42,7 +55,7 @@ BOOL Util_FillHexAscii(_In_ PBYTE pb, _In_ DWORD cb, _In_ DWORD cbInitialOffset,
 * -- psz1
 * -- psz2
 */
-VOID Util_PathSplit2(_In_ LPSTR sz, _Inout_ CHAR _szBuf[MAX_PATH], _Out_ LPSTR *psz1, _Out_ LPSTR *psz2);
+VOID Util_PathSplit2(_In_ LPSTR sz, _Out_writes_(MAX_PATH) PCHAR _szBuf, _Out_ LPSTR *psz1, _Out_ LPSTR *psz2);
 
 /*
 * Split a "path" string into two at the first '\' character. If no 2nd string
@@ -52,23 +65,39 @@ VOID Util_PathSplit2(_In_ LPSTR sz, _Inout_ CHAR _szBuf[MAX_PATH], _Out_ LPSTR *
 * -- psz1
 * -- psz2
 */
-VOID Util_PathSplit2_WCHAR(_In_ LPWSTR wsz, _Inout_ CHAR _szBuf[MAX_PATH], _Out_ LPSTR *psz1, _Out_ LPSTR *psz2);
+VOID Util_PathSplit2_WCHAR(_In_ LPWSTR wsz, _Out_writes_(MAX_PATH) PCHAR _szBuf, _Out_ LPSTR *psz1, _Out_ LPSTR *psz2);
 
 /*
 * Return the path of the specified hModule (DLL) - ending with a backslash, or current Executable.
 * -- szPath
 * -- hModule = Optional, HMODULE handle for path to DLL, NULL for path to EXE.
 */
-VOID Util_GetPathDll(_Out_ CHAR szPath[MAX_PATH], _In_opt_ HMODULE hModule);
+VOID Util_GetPathDll(_Out_writes_(MAX_PATH) PCHAR szPath, _In_opt_ HMODULE hModule);
+
+/*
+* Duplicates a string.
+* CALLER LocalFree return
+* -- sz
+* -- return fail: null, success: duplicated string - caller responsible for free with LocalFree()
+*/
+LPSTR Util_StrDupA(_In_opt_ LPSTR sz);
+
+/*
+* Convert a FILETIME into a human readable string.
+* -- pFileTime
+* -- szTime
+*/
+VOID Util_FileTime2String(_In_ PFILETIME pFileTime, _Out_writes_(MAX_PATH) LPSTR szTime);
 
 /*
 * Utility functions for read/write towards different underlying data representations.
 */
-NTSTATUS Util_VfsReadFile_FromPBYTE(_In_ PBYTE pbFile, _In_ QWORD cbFile, _Out_ LPVOID pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset);
-NTSTATUS Util_VfsReadFile_FromQWORD(_In_ QWORD qwValue, _Out_ LPVOID pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset, _In_ BOOL fPrefix);
-NTSTATUS Util_VfsReadFile_FromDWORD(_In_ DWORD dwValue, _Out_ LPVOID pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset, _In_ BOOL fPrefix);
-NTSTATUS Util_VfsReadFile_FromBOOL(_In_ BOOL fValue, _Out_ LPVOID pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset);
-NTSTATUS Util_VfsWriteFile_BOOL(_Inout_ PBOOL pfTarget, _In_ LPVOID pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset);
-NTSTATUS Util_VfsWriteFile_DWORD(_Inout_ PDWORD pdwTarget, _In_ LPVOID pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset, _In_ DWORD dwMinAllow);
+NTSTATUS Util_VfsReadFile_FromPBYTE(_In_ PBYTE pbFile, _In_ QWORD cbFile, _Out_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset);
+NTSTATUS Util_VfsReadFile_FromNumber(_In_ QWORD qwValue, _Out_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset);
+NTSTATUS Util_VfsReadFile_FromQWORD(_In_ QWORD qwValue, _Out_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset, _In_ BOOL fPrefix);
+NTSTATUS Util_VfsReadFile_FromDWORD(_In_ DWORD dwValue, _Out_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset, _In_ BOOL fPrefix);
+NTSTATUS Util_VfsReadFile_FromBOOL(_In_ BOOL fValue, _Out_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset);
+NTSTATUS Util_VfsWriteFile_BOOL(_Inout_ PBOOL pfTarget, _In_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset);
+NTSTATUS Util_VfsWriteFile_DWORD(_Inout_ PDWORD pdwTarget, _In_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset, _In_ DWORD dwMinAllow);
 
 #endif /* __UTIL_H__ */

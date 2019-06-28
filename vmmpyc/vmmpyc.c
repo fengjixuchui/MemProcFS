@@ -1,3 +1,9 @@
+// vmmpyc.c : implementation MemProcFS/VMM Python API
+//
+// (c) Ulf Frisk, 2018-2019
+// Author: Ulf Frisk, pcileech@frizk.net
+//
+#define Py_LIMITED_API 0x03060000
 #ifdef _DEBUG
 #undef _DEBUG
 #include <python.h>
@@ -5,8 +11,36 @@
 #else
 #include <python.h>
 #endif
+#include <ws2tcpip.h>
 #include <Windows.h>
 #include "vmmdll.h"
+
+//-----------------------------------------------------------------------------
+// UTIL FUNCTIONS BELOW:
+//-----------------------------------------------------------------------------
+
+VOID Util_FileTime2String(_In_ PFILETIME pFileTime, _Out_writes_(MAX_PATH) LPSTR szTime)
+{
+    SYSTEMTIME SystemTime;
+    if(!*(PQWORD)pFileTime) {
+        strcpy_s(szTime, MAX_PATH, "                    ***");
+        return;
+    }
+    FileTimeToSystemTime(pFileTime, &SystemTime);
+    sprintf_s(
+        szTime,
+        MAX_PATH,
+        "%04i-%02i-%02i %02i:%02i:%02i UTC",
+        SystemTime.wYear,
+        SystemTime.wMonth,
+        SystemTime.wDay,
+        SystemTime.wHour,
+        SystemTime.wMinute,
+        SystemTime.wSecond
+    );
+}
+
+
 
 //-----------------------------------------------------------------------------
 // INITIALIZATION FUNCTIONALITY BELOW:
@@ -15,9 +49,9 @@
 
 // [STR] -> None
 static PyObject*
-VMMPYC_InitializeReserved(PyObject *self, PyObject *args)
+VMMPYC_Initialize(PyObject *self, PyObject *args)
 {
-    PyObject *pyList, *pyString;
+    PyObject *pyList, *pyString, **pyBytesDstArgs;
     BOOL result;
     DWORD i, cDstArgs;
     LPSTR *pszDstArgs;
@@ -25,11 +59,12 @@ VMMPYC_InitializeReserved(PyObject *self, PyObject *args)
     cDstArgs = (DWORD)PyList_Size(pyList);
     if(cDstArgs == 0) { 
         Py_DECREF(pyList);
-        return PyErr_Format(PyExc_RuntimeError, "VMMPYC_InitializeReserved: Required argument list is empty.");
+        return PyErr_Format(PyExc_RuntimeError, "VMMPYC_Initialize: Required argument list is empty.");
     }
     // allocate & initialize buffer+basic
     pszDstArgs = (LPSTR*)LocalAlloc(LMEM_ZEROINIT, sizeof(LPSTR) * cDstArgs);
-    if(!pszDstArgs) {
+    pyBytesDstArgs = (PyObject**)LocalAlloc(LMEM_ZEROINIT, sizeof(PyObject*) * cDstArgs);
+    if(!pszDstArgs || !pyBytesDstArgs) {
         Py_DECREF(pyList);
         return PyErr_NoMemory();
     }
@@ -38,13 +73,42 @@ VMMPYC_InitializeReserved(PyObject *self, PyObject *args)
         pyString = PyList_GetItem(pyList, i);   // borrowed reference
         if(!PyUnicode_Check(pyString)) { 
             Py_DECREF(pyList);
-            return PyErr_Format(PyExc_RuntimeError, "VMMPYC_InitializeReserved: Argument list contains non string item.");
+            return PyErr_Format(PyExc_RuntimeError, "VMMPYC_Initialize: Argument list contains non string item.");
         }
-        pszDstArgs[i] = (char*)PyUnicode_1BYTE_DATA(pyString);
+        pyBytesDstArgs[i] = PyUnicode_AsEncodedString(pyString, NULL, NULL);
+        pszDstArgs[i] = pyBytesDstArgs[i] ? PyBytes_AsString(pyBytesDstArgs[i]) : "";
+
     }
     Py_DECREF(pyList);
-    result = VMMDLL_InitializeReserved(cDstArgs, pszDstArgs);
-    if(!result) { return PyErr_Format(PyExc_RuntimeError, "VMMPYC_InitializeReserved: Initialization of VMM failed."); }
+    result = VMMDLL_Initialize(cDstArgs, pszDstArgs);
+    for(i = 0; i < cDstArgs; i++) {
+        Py_XDECREF(pyBytesDstArgs[i]);
+    }
+    if(!result) { return PyErr_Format(PyExc_RuntimeError, "VMMPYC_Initialize: Initialization of VMM failed."); }
+    return Py_BuildValue("s", NULL);    // None returned on success.
+}
+
+// () -> None
+static PyObject*
+VMMPYC_Close(PyObject *self, PyObject *args)
+{
+    Py_BEGIN_ALLOW_THREADS;
+    VMMDLL_Close();
+    Py_END_ALLOW_THREADS;
+    return Py_BuildValue("s", NULL);    // None returned on success.
+}
+
+// (DWORD) -> None
+static PyObject*
+VMMPYC_Refresh(PyObject *self, PyObject *args)
+{
+    BOOL result;
+    DWORD dwReserved = 0;
+    if(!PyArg_ParseTuple(args, "k", &dwReserved)) { return NULL; }
+    Py_BEGIN_ALLOW_THREADS;
+    result = VMMDLL_Refresh(dwReserved);
+    Py_END_ALLOW_THREADS;
+    if(!result) { return PyErr_Format(PyExc_RuntimeError, "VMMPYC_Refresh: Refresh failed."); }
     return Py_BuildValue("s", NULL);    // None returned on success.
 }
 
@@ -63,9 +127,9 @@ VMMPYC_ConfigGet(PyObject *self, PyObject *args)
     BOOL result;
     ULONG64 fOption, qwValue = 0;
     if(!PyArg_ParseTuple(args, "K", &fOption)) { return NULL; }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     result = VMMDLL_ConfigGet(fOption, &qwValue);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) { return PyErr_Format(PyExc_RuntimeError, "VMMPYC_ConfigGet: Unable to retrieve config value for setting."); }
     return PyLong_FromUnsignedLongLong(qwValue);
 }
@@ -77,9 +141,9 @@ VMMPYC_ConfigSet(PyObject *self, PyObject *args)
     BOOL result;
     ULONG64 fOption, qwValue = 0;
     if(!PyArg_ParseTuple(args, "KK", &fOption, &qwValue)) { return NULL; }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     result = VMMDLL_ConfigSet(fOption, qwValue);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) { return PyErr_Format(PyExc_RuntimeError, "VMMPYC_ConfigSet: Unable to set config value for setting."); }
     return Py_BuildValue("s", NULL);    // None returned on success.
 }
@@ -96,10 +160,10 @@ VMMPYC_MemReadScatter(PyObject *self, PyObject *args)
 {
     PyObject *pyListSrc, *pyListItemSrc, *pyListDst, *pyDict;
     BOOL result;
-    DWORD dwPID, cMEMs, i, flags = 0;
-    ULONG64 qwA;
-    PVMMDLL_MEM_IO_SCATTER_HEADER pMEM, pMEMs;
-    PPVMMDLL_MEM_IO_SCATTER_HEADER ppMEMs;
+    DWORD dwPID, cMEMs, flags = 0;
+    ULONG64 i, qwA;
+    PMEM_IO_SCATTER_HEADER pMEM, pMEMs;
+    PPMEM_IO_SCATTER_HEADER ppMEMs;
     PBYTE pb, pbDataBuffer;
     if(!PyArg_ParseTuple(args, "kO!|k", &dwPID, &PyList_Type, &pyListSrc, &flags)) { return NULL; } // borrowed reference
     cMEMs = (DWORD)PyList_Size(pyListSrc);
@@ -108,14 +172,14 @@ VMMPYC_MemReadScatter(PyObject *self, PyObject *args)
         return PyList_New(0);
     }
     // allocate & initialize buffer+basic
-    pb = LocalAlloc(0, cMEMs * (sizeof(PVMMDLL_MEM_IO_SCATTER_HEADER) + sizeof(VMMDLL_MEM_IO_SCATTER_HEADER) + 0x1000));
+    pb = LocalAlloc(0, cMEMs * (sizeof(PMEM_IO_SCATTER_HEADER) + sizeof(MEM_IO_SCATTER_HEADER) + 0x1000));
     if(!pb) {
         Py_DECREF(pyListSrc);
         return PyErr_NoMemory();
     }
-    ppMEMs = (PPVMMDLL_MEM_IO_SCATTER_HEADER)pb;
-    pMEMs = (PVMMDLL_MEM_IO_SCATTER_HEADER)(pb + cMEMs * sizeof(PVMMDLL_MEM_IO_SCATTER_HEADER));
-    pbDataBuffer = pb + cMEMs * (sizeof(PVMMDLL_MEM_IO_SCATTER_HEADER) + sizeof(VMMDLL_MEM_IO_SCATTER_HEADER));
+    ppMEMs = (PPMEM_IO_SCATTER_HEADER)pb;
+    pMEMs = (PMEM_IO_SCATTER_HEADER)(pb + cMEMs * sizeof(PMEM_IO_SCATTER_HEADER));
+    pbDataBuffer = pb + cMEMs * (sizeof(PMEM_IO_SCATTER_HEADER) + sizeof(MEM_IO_SCATTER_HEADER));
     ZeroMemory(pb, pbDataBuffer - pb);
     // iterate over # entries and build scatter data structure
     for(i = 0; i < cMEMs; i++) {
@@ -139,9 +203,9 @@ VMMPYC_MemReadScatter(PyObject *self, PyObject *args)
     }
     Py_DECREF(pyListSrc);
     // call c-dll for vmm
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     result = VMMDLL_MemReadScatter(dwPID, ppMEMs, cMEMs, flags);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) {
         LocalFree(pb);
         return PyErr_Format(PyExc_RuntimeError, "VMMPYC_MemReadScatter: Failed.");
@@ -174,12 +238,12 @@ VMMPYC_MemRead(PyObject *self, PyObject *args)
     ULONG64 qwA, flags = 0;
     PBYTE pb;
     if(!PyArg_ParseTuple(args, "kKk|K", &dwPID, &qwA, &cb, &flags)) { return NULL; }
-    if(cb > 0x01000000) { return PyErr_Format(PyExc_RuntimeError, "VMMPYC_MemRead: Read larger than maxium supported (0x01000000) bytes requested."); }
+    if(cb > 0x01000000) { return PyErr_Format(PyExc_RuntimeError, "VMMPYC_MemRead: Read larger than maximum supported (0x01000000) bytes requested."); }
     pb = LocalAlloc(0, cb);
     if(!pb) { return PyErr_NoMemory(); }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     result = VMMDLL_MemReadEx(dwPID, qwA, pb, cb, &cbRead, flags);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) { 
         LocalFree(pb);
         return PyErr_Format(PyExc_RuntimeError, "VMMPYC_MemRead: Failed.");
@@ -193,30 +257,24 @@ VMMPYC_MemRead(PyObject *self, PyObject *args)
 static PyObject*
 VMMPYC_MemWrite(PyObject *self, PyObject *args)
 {
-    Py_buffer pyBuffer;
     BOOL result;
-    int iResult;
     DWORD dwPID;
     ULONG64 va;
-    PBYTE pb;
-    SIZE_T cb;
-    if(!PyArg_ParseTuple(args, "kKy*", &dwPID, &va, &pyBuffer)) { return NULL; }
-    cb = pyBuffer.len;
+    PBYTE pb, pbPy;
+    DWORD cb;
+    if(!PyArg_ParseTuple(args, "kKy#", &dwPID, &va, &pbPy, &cb)) { return NULL; }
     if(cb == 0) {
-        PyBuffer_Release(&pyBuffer);
         return Py_BuildValue("s", NULL);    // zero-byte write is always successful.
     }
     pb = LocalAlloc(0, cb);
     if(!pb) {
-        PyBuffer_Release(&pyBuffer);
         return PyErr_NoMemory();
     }
-    iResult = PyBuffer_ToContiguous(pb, &pyBuffer, cb, 'C');
-    PyBuffer_Release(&pyBuffer);
-    Py_BEGIN_ALLOW_THREADS
-    result = (iResult == 0) && VMMDLL_MemWrite(dwPID, va, pb, (DWORD)cb);
+    memcpy(pb, pbPy, cb);
+    Py_BEGIN_ALLOW_THREADS;
+    result = VMMDLL_MemWrite(dwPID, va, pb, (DWORD)cb);
     LocalFree(pb);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) { return PyErr_Format(PyExc_RuntimeError, "VMMPYC_MemWrite: Failed."); }
     return Py_BuildValue("s", NULL);    // None returned on success.
 }
@@ -229,9 +287,9 @@ VMMPYC_MemVirt2Phys(PyObject *self, PyObject *args)
     DWORD dwPID;
     ULONG64 va, pa;
     if(!PyArg_ParseTuple(args, "kK", &dwPID, &va)) { return NULL; }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     result = VMMDLL_MemVirt2Phys(dwPID, va, &pa);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) { return PyErr_Format(PyExc_RuntimeError, "VMMPYC_MemVirt2Phys: Failed."); }
     return PyLong_FromUnsignedLongLong(pa);
 }
@@ -243,18 +301,18 @@ VMMPYC_ProcessGetMemoryMap(PyObject *self, PyObject *args)
     PyObject *pyList, *pyDict;
     BOOL result, fIdentifyModules;
     DWORD dwPID, i;
-    ULONG64 cMemMapEntries;
+    ULONG64 cMemMapEntries = 0;
     PVMMDLL_MEMMAP_ENTRY pe, pMemMapEntries = NULL;
     CHAR sz[5];
     if(!PyArg_ParseTuple(args, "k|p", &dwPID, &fIdentifyModules)) { return NULL; }
     if(!(pyList = PyList_New(0))) { return PyErr_NoMemory(); }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     result =
         VMMDLL_ProcessGetMemoryMap(dwPID, NULL, &cMemMapEntries, fIdentifyModules) &&
         cMemMapEntries &&
         (pMemMapEntries = LocalAlloc(0, cMemMapEntries * sizeof(VMMDLL_MEMMAP_ENTRY))) &&
         VMMDLL_ProcessGetMemoryMap(dwPID, pMemMapEntries, &cMemMapEntries, fIdentifyModules);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) { 
         Py_DECREF(pyList);
         LocalFree(pMemMapEntries);
@@ -267,14 +325,14 @@ VMMPYC_ProcessGetMemoryMap(PyObject *self, PyObject *args)
             PyDict_SetItemString(pyDict, "size", PyLong_FromUnsignedLongLong(pe->cPages << 12));
             PyDict_SetItemString(pyDict, "pages", PyLong_FromUnsignedLongLong(pe->cPages));
             PyDict_SetItemString(pyDict, "wow64", PyBool_FromLong((long)pe->fWoW64));
-            PyDict_SetItemString(pyDict, "tag", PyUnicode_FromString(pe->szTag));
+            PyDict_SetItemString(pyDict, "tag", PyUnicode_FromFormat("%s", pe->szTag));
             PyDict_SetItemString(pyDict, "flags-pte", PyLong_FromUnsignedLongLong(pe->fPage));
             sz[0] = (pe->fPage & VMMDLL_MEMMAP_FLAG_PAGE_NS) ? '-' : 's';
             sz[1] = 'r';
             sz[2] = (pe->fPage & VMMDLL_MEMMAP_FLAG_PAGE_W) ? 'w' : '-';
             sz[3] = (pe->fPage & VMMDLL_MEMMAP_FLAG_PAGE_NX) ? '-' : 'x';
             sz[4] = 0;
-            PyDict_SetItemString(pyDict, "flags", PyUnicode_FromString(sz));
+            PyDict_SetItemString(pyDict, "flags", PyUnicode_FromFormat("%s", sz));
             PyList_Append(pyList, pyDict);
         }
     }
@@ -294,9 +352,9 @@ VMMPYC_ProcessGetMemoryMapEntry(PyObject *self, PyObject *args)
     CHAR sz[5];
     if(!PyArg_ParseTuple(args, "kK|p", &dwPID, &va, &fIdentifyModules)) { return NULL; }
     if(!(pyDict = PyDict_New())) { return PyErr_NoMemory(); }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     result = VMMDLL_ProcessGetMemoryMapEntry(dwPID, &e, va, fIdentifyModules);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) { 
         Py_DECREF(pyDict);
         return PyErr_Format(PyExc_RuntimeError, "VMMDLL_ProcessGetMemoryMapEntry: Failed.");
@@ -305,14 +363,14 @@ VMMPYC_ProcessGetMemoryMapEntry(PyObject *self, PyObject *args)
     PyDict_SetItemString(pyDict, "size", PyLong_FromUnsignedLongLong(e.cPages << 12));
     PyDict_SetItemString(pyDict, "pages", PyLong_FromUnsignedLongLong(e.cPages));
     PyDict_SetItemString(pyDict, "wow64", PyBool_FromLong((long)e.fWoW64));
-    PyDict_SetItemString(pyDict, "tag", PyUnicode_FromString(e.szTag));
+    PyDict_SetItemString(pyDict, "tag", PyUnicode_FromFormat("%s", e.szTag));
     PyDict_SetItemString(pyDict, "flags-pte", PyLong_FromUnsignedLongLong(e.fPage));
     sz[0] = (e.fPage & VMMDLL_MEMMAP_FLAG_PAGE_NS) ? '-' : 's';
     sz[1] = 'r';
     sz[2] = (e.fPage & VMMDLL_MEMMAP_FLAG_PAGE_W) ? 'w' : '-';
     sz[3] = (e.fPage & VMMDLL_MEMMAP_FLAG_PAGE_NX) ? '-' : 'x';
     sz[4] = 0;
-    PyDict_SetItemString(pyDict, "flags", PyUnicode_FromString(sz));
+    PyDict_SetItemString(pyDict, "flags", PyUnicode_FromFormat("%s", sz));
     return pyDict;
 }
 
@@ -323,17 +381,17 @@ VMMPYC_ProcessGetModuleMap(PyObject *self, PyObject *args)
     PyObject *pyList, *pyDict;
     BOOL result;
     DWORD dwPID;
-    ULONG64 i, cModuleEntries;
+    ULONG64 i, cModuleEntries = 0;
     PVMMDLL_MODULEMAP_ENTRY pe, pModuleEntries = NULL;
     if(!PyArg_ParseTuple(args, "k", &dwPID)) { return NULL; }
     if(!(pyList = PyList_New(0))) { return PyErr_NoMemory(); }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     result =
         VMMDLL_ProcessGetModuleMap(dwPID, NULL, &cModuleEntries) &&
         cModuleEntries &&
         (pModuleEntries = LocalAlloc(0, cModuleEntries * sizeof(VMMDLL_MODULEMAP_ENTRY))) &&
         VMMDLL_ProcessGetModuleMap(dwPID, pModuleEntries, &cModuleEntries);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) {
         Py_DECREF(pyList);
         LocalFree(pModuleEntries);
@@ -346,7 +404,7 @@ VMMPYC_ProcessGetModuleMap(PyObject *self, PyObject *args)
             PyDict_SetItemString(pyDict, "va-entry", PyLong_FromUnsignedLongLong(pe->EntryPoint));
             PyDict_SetItemString(pyDict, "size", PyLong_FromUnsignedLong(pe->SizeOfImage));
             PyDict_SetItemString(pyDict, "wow64", PyBool_FromLong((long)pe->fWoW64));
-            PyDict_SetItemString(pyDict, "name", PyUnicode_FromString(pe->szName));
+            PyDict_SetItemString(pyDict, "name", PyUnicode_FromFormat("%s", pe->szName));
             PyList_Append(pyList, pyDict);
         }
     }
@@ -365,10 +423,10 @@ VMMPYC_ProcessGetModuleFromName(PyObject *self, PyObject *args)
     VMMDLL_MODULEMAP_ENTRY e;
     if(!PyArg_ParseTuple(args, "ks", &dwPID, &szModuleName)) { return NULL; }
     if(!(pyDict = PyDict_New())) { return PyErr_NoMemory(); }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     ZeroMemory(&e, sizeof(VMMDLL_MODULEMAP_ENTRY));
     result = VMMDLL_ProcessGetModuleFromName(dwPID, szModuleName, &e);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) { 
         Py_DECREF(pyDict);
         return PyErr_Format(PyExc_RuntimeError, "VMMPYC_ProcessGetModuleFromName: Failed.");
@@ -377,7 +435,7 @@ VMMPYC_ProcessGetModuleFromName(PyObject *self, PyObject *args)
     PyDict_SetItemString(pyDict, "va-entry", PyLong_FromUnsignedLongLong(e.EntryPoint));
     PyDict_SetItemString(pyDict, "wow64", PyBool_FromLong((long)e.fWoW64));
     PyDict_SetItemString(pyDict, "size", PyLong_FromUnsignedLong(e.SizeOfImage));
-    PyDict_SetItemString(pyDict, "name", PyUnicode_FromString(e.szName));
+    PyDict_SetItemString(pyDict, "name", PyUnicode_FromFormat("%s", e.szName));
     return pyDict;
 }
 
@@ -389,9 +447,9 @@ VMMPYC_PidGetFromName(PyObject *self, PyObject *args)
     DWORD dwPID;
     LPSTR szProcessName;
     if(!PyArg_ParseTuple(args, "s", &szProcessName)) { return NULL; }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     result = VMMDLL_PidGetFromName(szProcessName, &dwPID);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) { return PyErr_Format(PyExc_RuntimeError, "VMMPYC_PidGetFromName: Failed."); }
     return PyLong_FromLong(dwPID);
 }
@@ -402,15 +460,15 @@ VMMPYC_PidList(PyObject *self, PyObject *args)
 {
     PyObject *pyList;
     BOOL result;
-    ULONG64 cPIDs;
+    ULONG64 cPIDs = 0;
     DWORD i, *pPIDs = NULL;
     if(!(pyList = PyList_New(0))) { return PyErr_NoMemory(); }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     result =
         VMMDLL_PidList(NULL, &cPIDs) &&
         (pPIDs = LocalAlloc(LMEM_ZEROINIT, cPIDs * sizeof(DWORD))) &&
         VMMDLL_PidList(pPIDs, &cPIDs);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) {
         Py_DECREF(pyList);
         LocalFree(pPIDs);
@@ -432,32 +490,54 @@ VMMPYC_ProcessGetInformation(PyObject *self, PyObject *args)
     DWORD dwPID;
     VMMDLL_PROCESS_INFORMATION info;
     SIZE_T cbInfo = sizeof(VMMDLL_PROCESS_INFORMATION);
+    LPSTR szPathKernel = NULL, szPathUser = NULL, szCmdLine = NULL;
     if(!PyArg_ParseTuple(args, "k", &dwPID)) { return NULL; }
     if(!(pyDict = PyDict_New())) { return PyErr_NoMemory(); }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     ZeroMemory(&info, sizeof(VMMDLL_PROCESS_INFORMATION));
     info.magic = VMMDLL_PROCESS_INFORMATION_MAGIC;
     info.wVersion = VMMDLL_PROCESS_INFORMATION_VERSION;
     result = VMMDLL_ProcessGetInformation(dwPID, &info, &cbInfo);
-    Py_END_ALLOW_THREADS
+    if(result) {
+        szPathKernel = VMMDLL_ProcessGetInformationString(dwPID, VMMDLL_PROCESS_INFORMATION_OPT_STRING_PATH_KERNEL);
+        szPathUser = VMMDLL_ProcessGetInformationString(dwPID, VMMDLL_PROCESS_INFORMATION_OPT_STRING_PATH_USER_IMAGE);
+        szCmdLine = VMMDLL_ProcessGetInformationString(dwPID, VMMDLL_PROCESS_INFORMATION_OPT_STRING_CMDLINE);
+    }
+    Py_END_ALLOW_THREADS;
     if(!result) {
         Py_DECREF(pyDict);
         return PyErr_Format(PyExc_RuntimeError, "VMMPYC_ProcessGetInformation: Failed.");
     }
     PyDict_SetItemString(pyDict, "pid", PyLong_FromUnsignedLong(info.dwPID));
-    PyDict_SetItemString(pyDict, "pa-pml4", PyLong_FromUnsignedLongLong(info.paPML4));
-    PyDict_SetItemString(pyDict, "pa-pml4-user", PyLong_FromUnsignedLongLong(info.paPML4_UserOpt));
+    PyDict_SetItemString(pyDict, "ppid", PyLong_FromUnsignedLong(info.dwPPID));
+    PyDict_SetItemString(pyDict, "pa-dtb", PyLong_FromUnsignedLongLong(info.paDTB));
+    PyDict_SetItemString(pyDict, "pa-dtb-user", PyLong_FromUnsignedLongLong(info.paDTB_UserOpt));
     PyDict_SetItemString(pyDict, "state", PyLong_FromUnsignedLong(info.dwState));
-    PyDict_SetItemString(pyDict, "target", PyLong_FromUnsignedLong(info.fTargetSystem));
+    PyDict_SetItemString(pyDict, "tp-memorymodel", PyLong_FromUnsignedLong(info.tpMemoryModel));
+    PyDict_SetItemString(pyDict, "tp-system", PyLong_FromUnsignedLong(info.tpSystem));
     PyDict_SetItemString(pyDict, "usermode", PyBool_FromLong(info.fUserOnly));
-    PyDict_SetItemString(pyDict, "name", PyUnicode_FromString(info.szName));
-    if(info.fTargetSystem == VMMDLL_TARGET_WINDOWS_X64) {
-        PyDict_SetItemString(pyDict, "wow64", PyBool_FromLong((long)info.os.win.fWow64));
-        PyDict_SetItemString(pyDict, "va-entry", PyLong_FromUnsignedLongLong(info.os.win.vaENTRY));
-        PyDict_SetItemString(pyDict, "va-eprocess", PyLong_FromUnsignedLongLong(info.os.win.vaEPROCESS));
-        PyDict_SetItemString(pyDict, "va-peb", PyLong_FromUnsignedLongLong(info.os.win.vaPEB));
-        PyDict_SetItemString(pyDict, "va-peb32", PyLong_FromUnsignedLongLong(info.os.win.vaPEB32));
+    PyDict_SetItemString(pyDict, "name", PyUnicode_FromFormat("%s", info.szName));
+    PyDict_SetItemString(pyDict, "name-long", PyUnicode_FromFormat("%s", info.szNameLong));
+    PyDict_SetItemString(pyDict, "path-kernel", PyUnicode_FromFormat("%s", szPathKernel ? szPathKernel : ""));
+    PyDict_SetItemString(pyDict, "path-user", PyUnicode_FromFormat("%s", szPathUser ? szPathUser : ""));
+    PyDict_SetItemString(pyDict, "cmdline", PyUnicode_FromFormat("%s", szCmdLine ? szCmdLine : ""));
+    switch(info.tpSystem) {
+        case VMMDLL_SYSTEM_WINDOWS_X64:
+            PyDict_SetItemString(pyDict, "wow64", PyBool_FromLong((long)info.os.win.fWow64));
+            PyDict_SetItemString(pyDict, "va-entry", PyLong_FromUnsignedLongLong(info.os.win.vaENTRY));
+            PyDict_SetItemString(pyDict, "va-eprocess", PyLong_FromUnsignedLongLong(info.os.win.vaEPROCESS));
+            PyDict_SetItemString(pyDict, "va-peb", PyLong_FromUnsignedLongLong(info.os.win.vaPEB));
+            PyDict_SetItemString(pyDict, "va-peb32", PyLong_FromUnsignedLongLong(info.os.win.vaPEB32));
+            break;
+        case VMMDLL_SYSTEM_WINDOWS_X86:
+            PyDict_SetItemString(pyDict, "va-entry", PyLong_FromUnsignedLongLong(info.os.win.vaENTRY));
+            PyDict_SetItemString(pyDict, "va-eprocess", PyLong_FromUnsignedLongLong(info.os.win.vaEPROCESS));
+            PyDict_SetItemString(pyDict, "va-peb", PyLong_FromUnsignedLongLong(info.os.win.vaPEB));
+            break;
     }
+    LocalFree(szPathKernel);
+    LocalFree(szPathUser);
+    LocalFree(szCmdLine);
     return pyDict;
 }
 
@@ -473,11 +553,11 @@ VMMPYC_ProcessGetDirectories(PyObject *self, PyObject *args)
     LPCSTR DIRECTORIES[16] = { "EXPORT", "IMPORT", "RESOURCE", "EXCEPTION", "SECURITY", "BASERELOC", "DEBUG", "ARCHITECTURE", "GLOBALPTR", "TLS", "LOAD_CONFIG", "BOUND_IMPORT", "IAT", "DELAY_IMPORT", "COM_DESCRIPTOR", "RESERVED" };
     if(!PyArg_ParseTuple(args, "ks", &dwPID, &szModule)) { return NULL; }
     if(!(pyList = PyList_New(0))) { return PyErr_NoMemory(); }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     result =
         (pDirectories = LocalAlloc(0, 16 * sizeof(IMAGE_DATA_DIRECTORY))) &&
         VMMDLL_ProcessGetDirectories(dwPID, szModule, pDirectories, 16, &cDirectories);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) {
         Py_DECREF(pyList);
         LocalFree(pDirectories);
@@ -489,7 +569,7 @@ VMMPYC_ProcessGetDirectories(PyObject *self, PyObject *args)
             PyDict_SetItemString(pyDict, "i", PyLong_FromUnsignedLong(i));
             PyDict_SetItemString(pyDict, "size", PyLong_FromUnsignedLong(pe->Size));
             PyDict_SetItemString(pyDict, "offset", PyLong_FromUnsignedLong(pe->VirtualAddress));
-            PyDict_SetItemString(pyDict, "name", PyUnicode_FromString(DIRECTORIES[i]));
+            PyDict_SetItemString(pyDict, "name", PyUnicode_FromFormat("%s", DIRECTORIES[i]));
             PyList_Append(pyList, pyDict);
         }
     }
@@ -510,13 +590,13 @@ VMMPYC_ProcessGetSections(PyObject *self, PyObject *args)
     szName[8] = 0;
     if(!PyArg_ParseTuple(args, "ks", &dwPID, &szModule)) { return NULL; }
     if(!(pyList = PyList_New(0))) { return PyErr_NoMemory(); }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     result =
         VMMDLL_ProcessGetSections(dwPID, szModule, NULL, 0, &cSections) &&
         cSections &&
         (pSections = LocalAlloc(0, cSections * sizeof(IMAGE_SECTION_HEADER))) &&
         VMMDLL_ProcessGetSections(dwPID, szModule, pSections, cSections, &cSections);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) {
         Py_DECREF(pyList);
         LocalFree(pSections);
@@ -530,7 +610,7 @@ VMMPYC_ProcessGetSections(PyObject *self, PyObject *args)
             PyDict_SetItemString(pyDict, "misc-PhysicalAddress", PyLong_FromUnsignedLong(pe->Misc.PhysicalAddress));
             PyDict_SetItemString(pyDict, "misc-VirtualSize", PyLong_FromUnsignedLong(pe->Misc.VirtualSize));
             *(PULONG64)szName = *(PULONG64)pe->Name;
-            PyDict_SetItemString(pyDict, "Name", PyUnicode_FromString(szName));
+            PyDict_SetItemString(pyDict, "Name", PyUnicode_FromFormat("%s", szName));
             PyDict_SetItemString(pyDict, "NumberOfLinenumbers", PyLong_FromUnsignedLong(pe->NumberOfLinenumbers));
             PyDict_SetItemString(pyDict, "NumberOfRelocations", PyLong_FromUnsignedLong(pe->NumberOfRelocations));
             PyDict_SetItemString(pyDict, "PointerToLinenumbers", PyLong_FromUnsignedLong(pe->PointerToLinenumbers));
@@ -556,13 +636,13 @@ VMMPYC_ProcessGetEAT(PyObject *self, PyObject *args)
     LPSTR szModule;
     if(!PyArg_ParseTuple(args, "ks", &dwPID, &szModule)) { return NULL; }
     if(!(pyList = PyList_New(0))) { return PyErr_NoMemory(); }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     result =
         VMMDLL_ProcessGetEAT(dwPID, szModule, NULL, 0, &cEATs) &&
         cEATs &&
         (pEATs = LocalAlloc(0, cEATs * sizeof(VMMDLL_EAT_ENTRY))) &&
         VMMDLL_ProcessGetEAT(dwPID, szModule, pEATs, cEATs, &cEATs);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) {
         Py_DECREF(pyList);
         LocalFree(pEATs);
@@ -574,7 +654,7 @@ VMMPYC_ProcessGetEAT(PyObject *self, PyObject *args)
             PyDict_SetItemString(pyDict, "i", PyLong_FromUnsignedLong(i));
             PyDict_SetItemString(pyDict, "va", PyLong_FromUnsignedLongLong(pe->vaFunction));
             PyDict_SetItemString(pyDict, "offset", PyLong_FromUnsignedLong(pe->vaFunctionOffset));
-            PyDict_SetItemString(pyDict, "fn", PyUnicode_FromString(pe->szFunction));
+            PyDict_SetItemString(pyDict, "fn", PyUnicode_FromFormat("%s", pe->szFunction));
             PyList_Append(pyList, pyDict);
         }
     }
@@ -593,13 +673,13 @@ VMMPYC_ProcessGetIAT(PyObject *self, PyObject *args)
     LPSTR szModule;
     if(!PyArg_ParseTuple(args, "ks", &dwPID, &szModule)) { return NULL; }
     if(!(pyList = PyList_New(0))) { return PyErr_NoMemory(); }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     result =
         VMMDLL_ProcessGetIAT(dwPID, szModule, NULL, 0, &cIATs) &&
         cIATs &&
         (pIATs = LocalAlloc(0, cIATs * sizeof(VMMDLL_IAT_ENTRY))) &&
         VMMDLL_ProcessGetIAT(dwPID, szModule, pIATs, cIATs, &cIATs);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) {
         Py_DECREF(pyList);
         LocalFree(pIATs);
@@ -610,8 +690,8 @@ VMMPYC_ProcessGetIAT(PyObject *self, PyObject *args)
             pe = pIATs + i;
             PyDict_SetItemString(pyDict, "i", PyLong_FromUnsignedLong(i));
             PyDict_SetItemString(pyDict, "va", PyLong_FromUnsignedLongLong(pe->vaFunction));
-            PyDict_SetItemString(pyDict, "fn", PyUnicode_FromString(pe->szFunction));
-            PyDict_SetItemString(pyDict, "dll", PyUnicode_FromString(pe->szModule));
+            PyDict_SetItemString(pyDict, "fn", PyUnicode_FromFormat("%s", pe->szFunction));
+            PyDict_SetItemString(pyDict, "dll", PyUnicode_FromFormat("%s", pe->szModule));
             PyList_Append(pyList, pyDict);
         }
     }
@@ -623,39 +703,33 @@ VMMPYC_ProcessGetIAT(PyObject *self, PyObject *args)
 static PyObject*
 VMMPYC_UtilFillHexAscii(PyObject *self, PyObject *args)
 {
-    Py_buffer pyBuffer;
     PyObject *pyString;
-    DWORD cb, cbInitialOffset = 0, iResult, csz = 0;
-    PBYTE pb;
+    DWORD cb, cbInitialOffset = 0, csz = 0;
+    PBYTE pb, pbPy;
     LPSTR sz = NULL;
     BOOL result;
-    if(!PyArg_ParseTuple(args, "y*|k", &pyBuffer, &cbInitialOffset)) { return NULL; }
-    cb = (DWORD)pyBuffer.len;
+    if(!PyArg_ParseTuple(args, "y#|k", &pbPy, &cb, &cbInitialOffset)) { return NULL; }
     if(cb == 0) {
-        PyBuffer_Release(&pyBuffer);
-        return PyUnicode_FromString("");
+        return PyUnicode_FromFormat("%s", "");
     }
     pb = LocalAlloc(0, cb);
     if(!pb) {
-        PyBuffer_Release(&pyBuffer);
         return PyErr_NoMemory();
     }
-    iResult = PyBuffer_ToContiguous(pb, &pyBuffer, cb, 'C');
-    PyBuffer_Release(&pyBuffer);
-    Py_BEGIN_ALLOW_THREADS
+    memcpy(pb, pbPy, cb);
+    Py_BEGIN_ALLOW_THREADS;
     result =
-        (iResult == 0) &&
         VMMDLL_UtilFillHexAscii(pb, cb, cbInitialOffset, NULL, &csz) &&
         csz &&
         (sz = (LPSTR)LocalAlloc(0, csz)) &&
         VMMDLL_UtilFillHexAscii(pb, cb, cbInitialOffset, sz, &csz);
     LocalFree(pb);
-    Py_END_ALLOW_THREADS
-    if(!result || !sz) { 
+    Py_END_ALLOW_THREADS;
+    if(!result || !sz) {
         LocalFree(sz);
         return PyErr_Format(PyExc_RuntimeError, "VMMPYC_UtilFillHexAscii: Failed.");
     }
-    pyString = PyUnicode_FromString(sz);
+    pyString = PyUnicode_FromFormat("%s", sz);
     LocalFree(sz);
     return pyString;
 }
@@ -672,7 +746,7 @@ VMMPYC_VfsRead(PyObject *self, PyObject *args)
     LPSTR szFileName;
     WCHAR wszFileName[MAX_PATH];
     if(!PyArg_ParseTuple(args, "sk|K", &szFileName, &cb, &cbOffset)) { return NULL; }
-    if(cb > 0x01000000) { return PyErr_Format(PyExc_RuntimeError, "VMMPYC_VfsRead: Read larger than maxium supported (0x01000000) bytes requested."); }
+    if(cb > 0x01000000) { return PyErr_Format(PyExc_RuntimeError, "VMMPYC_VfsRead: Read larger than maximum supported (0x01000000) bytes requested."); }
     {   // char* -> wchar*
         for(i = 0; i < MAX_PATH - 1; i++) {
             wszFileName[i] = szFileName[i];
@@ -682,9 +756,9 @@ VMMPYC_VfsRead(PyObject *self, PyObject *args)
     }
     pb = LocalAlloc(0, cb);
     if(!pb) { return PyErr_NoMemory(); }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     nt = VMMDLL_VfsRead(wszFileName, pb, cb, &cbRead, cbOffset);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(nt != VMMDLL_STATUS_SUCCESS) {
         LocalFree(pb);
         return PyErr_Format(PyExc_RuntimeError, "VMMPYC_VfsRead: Failed.");
@@ -698,18 +772,14 @@ VMMPYC_VfsRead(PyObject *self, PyObject *args)
 static PyObject*
 VMMPYC_VfsWrite(PyObject *self, PyObject *args)
 {
-    Py_buffer pyBuffer;
     BOOL result;
-    int iResult;
     DWORD i, cb, cbWritten;
     ULONG64 cbOffset;
-    PBYTE pb;
+    PBYTE pb, pbPy;
     LPSTR szFileName;
     WCHAR wszFileName[MAX_PATH];
-    if(!PyArg_ParseTuple(args, "sy*|K", &szFileName, &pyBuffer, &cbOffset)) { return NULL; }
-    cb = (DWORD)pyBuffer.len;
+    if(!PyArg_ParseTuple(args, "sy#|K", &szFileName, &pbPy, &cb, &cbOffset)) { return NULL; }
     if(cb == 0) {
-        PyBuffer_Release(&pyBuffer);
         return Py_BuildValue("s", NULL);    // zero-byte write is always successful.
     }
     {   // char* -> wchar*
@@ -721,18 +791,266 @@ VMMPYC_VfsWrite(PyObject *self, PyObject *args)
     }
     pb = LocalAlloc(0, cb);
     if(!pb) {
-        PyBuffer_Release(&pyBuffer);
         return PyErr_NoMemory();
     }
-    iResult = PyBuffer_ToContiguous(pb, &pyBuffer, cb, 'C');
-    PyBuffer_Release(&pyBuffer);
-    Py_BEGIN_ALLOW_THREADS
-    result = (iResult == 0) && (VMMDLL_STATUS_SUCCESS == VMMDLL_VfsWrite(wszFileName, pb, cb, &cbWritten, cbOffset));
+    memcpy(pb, pbPy, cb);
+    Py_BEGIN_ALLOW_THREADS;
+    result = (VMMDLL_STATUS_SUCCESS == VMMDLL_VfsWrite(wszFileName, pb, cb, &cbWritten, cbOffset));
     LocalFree(pb);
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     if(!result) { return PyErr_Format(PyExc_RuntimeError, "VMMPYC_VfsWrite: Failed."); }
     return Py_BuildValue("s", NULL);    // None returned on success.
 }
+
+// (DWORD, STR, STR) -> ULONG64
+static PyObject*
+VMMPYC_ProcessGetProcAddress(PyObject *self, PyObject *args)
+{
+    ULONG64 va;
+    DWORD dwPID;
+    LPSTR szModuleName, szProcName;
+    if(!PyArg_ParseTuple(args, "kss", &dwPID, &szModuleName, &szProcName)) { return NULL; }
+    Py_BEGIN_ALLOW_THREADS;
+    va = VMMDLL_ProcessGetProcAddress(dwPID, szModuleName, szProcName);
+    Py_END_ALLOW_THREADS;
+    return va ?
+        PyLong_FromUnsignedLongLong(va) :
+        PyErr_Format(PyExc_RuntimeError, "VMMPYC_ProcessGetProcAddress: Failed.");
+}
+
+// (DWORD, STR) -> ULONG64
+static PyObject*
+VMMPYC_ProcessGetModuleBase(PyObject *self, PyObject *args)
+{
+    ULONG64 va;
+    DWORD dwPID;
+    LPSTR szModuleName;
+    if(!PyArg_ParseTuple(args, "ks", &dwPID, &szModuleName)) { return NULL; }
+    Py_BEGIN_ALLOW_THREADS;
+    va = VMMDLL_ProcessGetModuleBase(dwPID, szModuleName);
+    Py_END_ALLOW_THREADS;
+    return va ?
+        PyLong_FromUnsignedLongLong(va) :
+        PyErr_Format(PyExc_RuntimeError, "VMMPYC_ProcessGetModuleBase: Failed.");
+}
+
+// (DWORD, STR, STR) -> {...}
+static PyObject*
+VMMPYC_WinGetThunkInfoEAT(PyObject *self, PyObject *args)
+{
+    PyObject *pyDict;
+    BOOL result;
+    DWORD dwPID;
+    VMMDLL_WIN_THUNKINFO_EAT oThunkInfoEAT = { 0 };
+    LPSTR szModuleName, szExportFunctionName;
+    if(!PyArg_ParseTuple(args, "kss", &dwPID, &szModuleName, &szExportFunctionName)) { return NULL; }
+    Py_BEGIN_ALLOW_THREADS;
+    result = VMMDLL_WinGetThunkInfoEAT(dwPID, szModuleName, szExportFunctionName, &oThunkInfoEAT);
+    Py_END_ALLOW_THREADS;
+    if(!result || !oThunkInfoEAT.fValid) {
+        return PyErr_Format(PyExc_RuntimeError, "VMMPYC_WinGetThunkInfoEAT: Failed.");
+    }
+    pyDict = PyDict_New();
+    if(pyDict) {
+        PyDict_SetItemString(pyDict, "vaFunction", PyLong_FromUnsignedLongLong(oThunkInfoEAT.vaFunction));
+        PyDict_SetItemString(pyDict, "valueThunk", PyLong_FromUnsignedLong(oThunkInfoEAT.valueThunk));
+        PyDict_SetItemString(pyDict, "vaNameFunction", PyLong_FromUnsignedLongLong(oThunkInfoEAT.vaNameFunction));
+        PyDict_SetItemString(pyDict, "vaThunk", PyLong_FromUnsignedLongLong(oThunkInfoEAT.vaThunk));
+    }
+    return pyDict;
+}
+
+// (DWORD, STR, STR, STR) -> {...}
+static PyObject*
+VMMPYC_WinGetThunkInfoIAT(PyObject *self, PyObject *args)
+{
+    PyObject *pyDict;
+    BOOL result;
+    DWORD dwPID;
+    VMMDLL_WIN_THUNKINFO_IAT oThunkInfoIAT = { 0 };
+    LPSTR szModuleName, szImportModuleName, szImportFunctionName;
+    if(!PyArg_ParseTuple(args, "ksss", &dwPID, &szModuleName, &szImportModuleName, &szImportFunctionName)) { return NULL; }
+    Py_BEGIN_ALLOW_THREADS;
+    result = VMMDLL_WinGetThunkInfoIAT(dwPID, szModuleName, szImportModuleName, szImportFunctionName, &oThunkInfoIAT);
+    Py_END_ALLOW_THREADS;
+    if(!result || !oThunkInfoIAT.fValid) {
+        return PyErr_Format(PyExc_RuntimeError, "VMMPYC_WinGetThunkInfoEAT: Failed.");
+    }
+    pyDict = PyDict_New();
+    if(pyDict) {
+        PyDict_SetItemString(pyDict, "32", PyBool_FromLong(oThunkInfoIAT.f32 ? 1 : 0));
+        PyDict_SetItemString(pyDict, "vaFunction", PyLong_FromUnsignedLongLong(oThunkInfoIAT.vaFunction));
+        PyDict_SetItemString(pyDict, "vaNameFunction", PyLong_FromUnsignedLongLong(oThunkInfoIAT.vaNameFunction));
+        PyDict_SetItemString(pyDict, "vaNameModule", PyLong_FromUnsignedLongLong(oThunkInfoIAT.vaNameModule));
+        PyDict_SetItemString(pyDict, "vaThunk", PyLong_FromUnsignedLongLong(oThunkInfoIAT.vaThunk));
+    }
+    return pyDict;
+}
+
+// (ULONG64, DWORD) -> {b: PBYTE, c: DWORD}
+static PyObject*
+VMMPYC_WinMemCompression_DecompressPage(PyObject *self, PyObject *args)
+{
+    PyObject *pyDict;
+    BOOL result;
+    DWORD cb, cbCompressed;
+    ULONG64 va;
+    BYTE pbDecompressed[0x1000] = { 0 };
+    if(!PyArg_ParseTuple(args, "Kk", &va, &cb)) { return NULL; }
+    Py_BEGIN_ALLOW_THREADS;
+    result = VMMDLL_WinMemCompression_DecompressPage(va, cb, pbDecompressed, &cbCompressed);
+    Py_END_ALLOW_THREADS;
+    if(!result) {
+        return PyErr_Format(PyExc_RuntimeError, "VMMPYC_WinMemCompression_DecompressPage: Failed.");
+    }
+    pyDict = PyDict_New();
+    if(pyDict) {
+        PyDict_SetItemString(pyDict, "c", PyLong_FromUnsignedLong(cbCompressed));
+        PyDict_SetItemString(pyDict, "b", PyBytes_FromStringAndSize(pbDecompressed, 0x1000));
+    }
+    return pyDict;
+}
+
+// () -> [{...}]
+static PyObject *
+VMMPYC_WinReg_HiveList(PyObject *self, PyObject *args)
+{
+    PyObject *pyList, *pyDict;
+    BOOL result;
+    DWORD i, cHives;
+    PVMMDLL_REGISTRY_HIVE_INFORMATION pe, pHives = NULL;
+    if(!(pyList = PyList_New(0))) { return PyErr_NoMemory(); }
+    Py_BEGIN_ALLOW_THREADS;
+    VMMDLL_WinReg_HiveList(NULL, 0, &cHives);
+    result =
+        VMMDLL_WinReg_HiveList(NULL, 0, &cHives) &&
+        cHives &&
+        (pHives = LocalAlloc(0, cHives * sizeof(VMMDLL_REGISTRY_HIVE_INFORMATION))) &&
+        VMMDLL_WinReg_HiveList(pHives, cHives, &cHives);
+    Py_END_ALLOW_THREADS;
+    if(!result) {
+        Py_DECREF(pyList);
+        LocalFree(pHives);
+        return PyErr_Format(PyExc_RuntimeError, "VMMPYC_WinRegHive_List: Failed.");
+    }
+    for(i = 0; i < cHives; i++) {
+        if((pyDict = PyDict_New())) {
+            pe = pHives + i;
+            PyDict_SetItemString(pyDict, "i", PyLong_FromUnsignedLong(i));
+            PyDict_SetItemString(pyDict, "va_hive", PyLong_FromUnsignedLongLong(pe->vaCMHIVE));
+            PyDict_SetItemString(pyDict, "va_baseblock", PyLong_FromUnsignedLongLong(pe->vaHBASE_BLOCK));
+            PyDict_SetItemString(pyDict, "name", PyUnicode_FromFormat("%s", pe->szName));
+            PyList_Append(pyList, pyDict);
+        }
+    }
+    LocalFree(pHives);
+    return pyList;
+}
+
+// (ULONG64, DWORD, DWORD, (ULONG64)) -> PBYTE
+static PyObject *
+VMMPYC_WinReg_HiveRead(PyObject *self, PyObject *args)
+{
+    PyObject *pyBytes;
+    BOOL result;
+    DWORD ra, cb, cbRead = 0;
+    ULONG64 vaHive, flags = 0;
+    PBYTE pb;
+    if(!PyArg_ParseTuple(args, "Kkk|K", &vaHive, &ra, &cb, &flags)) { return NULL; }
+    if(cb > 0x01000000) { return PyErr_Format(PyExc_RuntimeError, "VMMPYC_WinRegHive_Read: Read larger than maximum supported (0x01000000) bytes requested."); }
+    pb = LocalAlloc(0, cb);
+    if(!pb) { return PyErr_NoMemory(); }
+    Py_BEGIN_ALLOW_THREADS;
+    result = VMMDLL_WinReg_HiveReadEx(vaHive, ra, pb, cb, &cbRead, flags);
+    Py_END_ALLOW_THREADS;
+    if(!result) {
+        LocalFree(pb);
+        return PyErr_Format(PyExc_RuntimeError, "VMMPYC_WinRegHive_Read: Failed.");
+    }
+    pyBytes = PyBytes_FromStringAndSize(pb, cbRead);
+    LocalFree(pb);
+    return pyBytes;
+}
+
+// (ULONG64, DWORD, PBYTE) -> None
+static PyObject *
+VMMPYC_WinReg_HiveWrite(PyObject *self, PyObject *args)
+{
+    BOOL result;
+    DWORD ra;
+    ULONG64 vaHive;
+    PBYTE pb, pbPy;
+    DWORD cb;
+    if(!PyArg_ParseTuple(args, "Kky#", &vaHive, &ra, &pbPy, &cb)) { return NULL; }
+    if(cb == 0) {
+        return Py_BuildValue("s", NULL);    // zero-byte write is always successful.
+    }
+    pb = LocalAlloc(0, cb);
+    if(!pb) {
+        return PyErr_NoMemory();
+    }
+    memcpy(pb, pbPy, cb);
+    Py_BEGIN_ALLOW_THREADS;
+    result = VMMDLL_WinReg_HiveWrite(vaHive, ra, pb, (DWORD)cb);
+    LocalFree(pb);
+    Py_END_ALLOW_THREADS;
+    if(!result) { return PyErr_Format(PyExc_RuntimeError, "VMMPYC_WinRegHive_Write: Failed."); }
+    return Py_BuildValue("s", NULL);    // None returned on success.
+}
+
+// () -> {'tcpe': [{...}]}
+static PyObject*
+VMMPYC_WinNet_Get(PyObject* self, PyObject* args)
+{
+    PyObject *pyDict, *pyListTcpE, *pyDictTcpE;
+    DWORD i, dwIpVersion;
+    PVMMDLL_WIN_TCPIP pNet = NULL;
+    PVMMDLL_WIN_TCPIP_ENTRY pE;
+    CHAR szSrc[64], szDst[64], szTime[MAX_PATH];
+    if(!(pyDict = PyDict_New())) { return PyErr_NoMemory(); }
+    if(!(pyListTcpE = PyList_New(0))) { return PyErr_NoMemory(); }
+    PyDict_SetItemString(pyDict, "TcpE", pyListTcpE);
+    Py_BEGIN_ALLOW_THREADS;
+    pNet = VMMDLL_WinNet_Get();
+    Py_END_ALLOW_THREADS;
+    if(!pNet || (pNet->magic != VMMDLL_WIN_TCPIP_MAGIC) || (pNet->dwVersion != VMMDLL_WIN_TCPIP_VERSION)) {
+        LocalFree(pNet);
+        Py_DECREF(pyDict);
+        return PyErr_Format(PyExc_RuntimeError, "VMMPYC_WinNet_Get: Failed.");
+    }
+    // add tcp endpoint entries to TcpE list
+    for(i = 0; i < pNet->cTcpE; i++) {
+        if((pyDictTcpE = PyDict_New())) {
+            pE = pNet->pTcpE + i;
+            dwIpVersion = (pE->AF.wAF == AF_INET) ? 4 : ((pE->AF.wAF == AF_INET6) ? 6 : 0);
+            // format src/dst addr
+            szSrc[0] = 0;
+            szDst[0] = 0;
+            if(pE->Src.fValid) {
+                InetNtopA(pE->AF.wAF, pE->Src.pbA, szSrc, sizeof(szSrc));
+            }
+            if(pE->Dst.fValid) {
+                InetNtopA(pE->AF.wAF, pE->Dst.pbA, szDst, sizeof(szDst));
+            }
+            // get time
+            Util_FileTime2String((PFILETIME)&pE->qwTime, szTime);
+            PyDict_SetItemString(pyDictTcpE, "ver", PyLong_FromUnsignedLong(dwIpVersion));
+            PyDict_SetItemString(pyDictTcpE, "pid", PyLong_FromUnsignedLong(pE->dwPID));
+            PyDict_SetItemString(pyDictTcpE, "state", PyLong_FromUnsignedLong(pE->dwState));
+            PyDict_SetItemString(pyDictTcpE, "va", PyLong_FromUnsignedLongLong(pE->vaTcpE));
+            PyDict_SetItemString(pyDictTcpE, "time", PyLong_FromUnsignedLongLong(pE->qwTime));
+            PyDict_SetItemString(pyDictTcpE, "time-str", PyUnicode_FromFormat("%s", szTime));
+            PyDict_SetItemString(pyDictTcpE, "src-ip", PyUnicode_FromFormat("%s", szSrc));
+            PyDict_SetItemString(pyDictTcpE, "src-port", PyLong_FromUnsignedLong(pE->Src.wPort));
+            PyDict_SetItemString(pyDictTcpE, "dst-ip", PyUnicode_FromFormat("%s", szDst));
+            PyDict_SetItemString(pyDictTcpE, "dst-port", PyLong_FromUnsignedLong(pE->Dst.wPort));
+            PyList_Append(pyListTcpE, pyDictTcpE);
+        }
+    }
+    LocalFree(pNet);
+    return pyDict;
+}
+
 
 
 typedef struct tdVMMPYC_VFSLIST {
@@ -780,20 +1098,20 @@ VMMPYC_VfsList(PyObject *self, PyObject *args)
     PVMMPYC_VFSLIST pE = NULL, pE_Next;
     if(!PyArg_ParseTuple(args, "s", &szPath)) { return NULL; }
     if(!(pyDict = PyDict_New())) { return PyErr_NoMemory(); }
-    Py_BEGIN_ALLOW_THREADS
+    Py_BEGIN_ALLOW_THREADS;
     {   // char* -> wchar*
         for(i = 0; i < MAX_PATH - 1; i++) {
             wszPath[i] = szPath[i];
             if(0 == szPath[i]) { break; }
         }
-    wszPath[MAX_PATH - 1] = 0;
+        wszPath[MAX_PATH - 1] = 0;
     }
     hFileList.h = &pE;
     hFileList.pfnAddFile = VMMPYC_VfsList_AddFile;
     hFileList.pfnAddDirectory = VMMPYC_VfsList_AddDirectory;
     result = VMMDLL_VfsList(wszPath, &hFileList);
     pE = *(PVMMPYC_VFSLIST*)hFileList.h;
-    Py_END_ALLOW_THREADS
+    Py_END_ALLOW_THREADS;
     while(pE) {
         if((PyDict_Attr = PyDict_New())) {
             PyDict_SetItemString(PyDict_Attr, "f_isdir", PyBool_FromLong(pE->fIsDir ? 1 : 0));
@@ -816,7 +1134,9 @@ VMMPYC_VfsList(PyObject *self, PyObject *args)
 //-----------------------------------------------------------------------------
 
 static PyMethodDef VMMPYC_EmbMethods[] = {
-    {"VMMPYC_InitializeReserved", VMMPYC_InitializeReserved, METH_VARARGS, "Initialize the VMM"},
+    {"VMMPYC_Initialize", VMMPYC_Initialize, METH_VARARGS, "Initialize the VMM"},
+    {"VMMPYC_Close", VMMPYC_Close, METH_VARARGS, "Try close the VMM"},
+    {"VMMPYC_Refresh", VMMPYC_Refresh, METH_VARARGS, "Force refresh the VMM (process listings and caches)."},
     {"VMMPYC_ConfigGet", VMMPYC_ConfigGet, METH_VARARGS, "Get a device specific option value."},
     {"VMMPYC_ConfigSet", VMMPYC_ConfigSet, METH_VARARGS, "Set a device specific option value."},
     {"VMMPYC_MemReadScatter", VMMPYC_MemReadScatter, METH_VARARGS, "Read multiple 4kB page sized and aligned chunks of memory given as an address list."},
@@ -834,9 +1154,18 @@ static PyMethodDef VMMPYC_EmbMethods[] = {
     {"VMMPYC_ProcessGetSections", VMMPYC_ProcessGetSections, METH_VARARGS, "Retrieve the sections for a specific process and module."},
     {"VMMPYC_ProcessGetEAT", VMMPYC_ProcessGetEAT, METH_VARARGS, "Retrieve the export address table (EAT) for a specific process and module."},
     {"VMMPYC_ProcessGetIAT", VMMPYC_ProcessGetIAT, METH_VARARGS, "Retrieve the import address table (IAT) for a specific process and module."},
+    {"VMMPYC_ProcessGetProcAddress", VMMPYC_ProcessGetProcAddress, METH_VARARGS, "Retrieve the proc address of a given module!function."},
+    {"VMMPYC_ProcessGetModuleBase", VMMPYC_ProcessGetModuleBase, METH_VARARGS, "Retrieve the module base address given a module."},
+    {"VMMPYC_WinGetThunkInfoEAT", VMMPYC_WinGetThunkInfoEAT, METH_VARARGS, "Retrieve information about the export address table (EAT) thunk. (useful for patching)."},
+    {"VMMPYC_WinGetThunkInfoIAT", VMMPYC_WinGetThunkInfoIAT, METH_VARARGS, "Retrieve information about the import address table (IAT) thunk. (useful for patching)."},
+    {"VMMPYC_WinReg_HiveList", VMMPYC_WinReg_HiveList, METH_VARARGS, "List registry hives."},
+    {"VMMPYC_WinReg_HiveRead", VMMPYC_WinReg_HiveRead, METH_VARARGS, "Read raw registry hive."},
+    {"VMMPYC_WinReg_HiveWrite", VMMPYC_WinReg_HiveWrite, METH_VARARGS, "Write raw registry hive."},
+    {"VMMPYC_WinNet_Get", VMMPYC_WinNet_Get, METH_VARARGS, "Retrieve windows networking information."},
     {"VMMPYC_VfsRead", VMMPYC_VfsRead, METH_VARARGS, "Read from a file in the virtual file system."},
     {"VMMPYC_VfsWrite", VMMPYC_VfsWrite, METH_VARARGS, "Write to a file in the virtual file system."},
     {"VMMPYC_VfsList", VMMPYC_VfsList, METH_VARARGS, "List files and folder for a specific directory in the Virutal File System."},
+    {"VMMPYC_WinMemCompression_DecompressPage", VMMPYC_WinMemCompression_DecompressPage, METH_VARARGS, "Decompress compressed memory in the MemCompression process (if any)."},
     {"VMMPYC_UtilFillHexAscii", VMMPYC_UtilFillHexAscii, METH_VARARGS, "Convert a bytes object into a human readable 'memory dump' style type of string."},
     {NULL, NULL, 0, NULL}
 };
