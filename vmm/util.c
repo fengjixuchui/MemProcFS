@@ -14,7 +14,7 @@ DWORD Util_GetNumDigits(_In_ DWORD dwNumber)
     return (DWORD)max(1, floor(log10(dwNumber) + 1));
 }
 
-QWORD Util_GetNumeric(_In_ LPSTR sz)
+QWORD Util_GetNumericA(_In_ LPSTR sz)
 {
     if((strlen(sz) > 1) && (sz[0] == '0') && ((sz[1] == 'x') || (sz[1] == 'X'))) {
         return strtoull(sz, NULL, 16); // Hex (starts with 0x)
@@ -23,28 +23,41 @@ QWORD Util_GetNumeric(_In_ LPSTR sz)
     }
 }
 
+QWORD Util_GetNumericW(_In_ LPWSTR wsz)
+{
+    if((wcslen(wsz) > 1) && (wsz[0] == '0') && ((wsz[1] == 'x') || (wsz[1] == 'X'))) {
+        return wcstoull(wsz, NULL, 16); // Hex (starts with 0x)
+    } else {
+        return wcstoull(wsz, NULL, 10); // Not Hex -> try Decimal
+    }
+}
+
+DWORD Util_HashStringA(_In_opt_ LPCSTR sz)
+{
+    CHAR c;
+    DWORD i = 0, dwHash = 0;
+    if(!sz) { return 0; }
+    while(TRUE) {
+        c = sz[i++];
+        if(!c) { return dwHash; }
+        dwHash = ((dwHash >> 13) | (dwHash << 19)) + c;
+    }
+}
+
 #define Util_2HexChar(x) (((((x) & 0xf) <= 9) ? '0' : ('a' - 10)) + ((x) & 0xf))
 
-#define UTIL_PRINTASCII \
-    "................................ !\"#$%&'()*+,-./0123456789:;<=>?" \
-    "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~ " \
-    "................................................................" \
-    "................................................................" \
-
-#define UTIL_ASCIIFILENAME_ALLOW \
-    "0000000000000000000000000000000011011111111111101111111111010100" \
-    "1111111111111111111111111111011111111111111111111111111111110111" \
-    "0000000000000000000000000000000000000000000000000000000000000000" \
-    "0000000000000000000000000000000000000000000000000000000000000000" \
-
-BOOL Util_FillHexAscii(_In_ PBYTE pb, _In_ DWORD cb, _In_ DWORD cbInitialOffset, _Inout_opt_ LPSTR sz, _Out_ PDWORD pcsz)
+_Success_(return)
+BOOL Util_FillHexAscii(_In_opt_ PBYTE pb, _In_ DWORD cb, _In_ DWORD cbInitialOffset, _Out_opt_ LPSTR sz, _Inout_ PDWORD pcsz)
 {
-    DWORD i, j, o = 0, szMax, iMod;
+    DWORD i, j, o = 0, iMod, cRows;
     // checks
     if((cbInitialOffset > cb) || (cbInitialOffset > 0x1000) || (cbInitialOffset & 0xf)) { return FALSE; }
-    *pcsz = szMax = cb * 5 + 80;
-    if(cb > szMax) { return FALSE; }
-    if(!sz) { return TRUE; }
+    cRows = (cb + 0xf) >> 4;
+    if(!sz) {
+        *pcsz = 1 + cRows * 76;
+        return TRUE;
+    }
+    if(!pb || (*pcsz <= cRows * 76)) { return FALSE; }
     // fill buffer with bytes
     for(i = cbInitialOffset; i < cb + ((cb % 16) ? (16 - cb % 16) : 0); i++)
     {
@@ -86,13 +99,14 @@ BOOL Util_FillHexAscii(_In_ PBYTE pb, _In_ DWORD cb, _In_ DWORD cbInitialOffset,
             sz[o++] = '\n';
         }
     }
-    sz[o++] = 0;
+    sz[o] = 0;
+    *pcsz = o;
     return TRUE;
 }
 
 VOID Util_PrintHexAscii(_In_ PBYTE pb, _In_ DWORD cb, _In_ DWORD cbInitialOffset)
 {
-    DWORD szMax;
+    DWORD szMax = 0;
     LPSTR sz;
     if(cb > 0x10000) {
         vmmprintf("Large output. Only displaying first 65kB.\n");
@@ -114,44 +128,111 @@ VOID Util_AsciiFileNameFix(_In_ LPSTR sz, _In_ CHAR chDefault)
     }
 }
 
-VOID Util_PathSplit2(_In_ LPSTR sz, _Out_writes_(MAX_PATH) PCHAR _szBuf, _Out_ LPSTR *psz1, _Out_ LPSTR *psz2)
+DWORD Util_PathFileNameFixA(_Out_writes_(MAX_PATH) LPWSTR wszOut, _In_ LPCSTR sz, _In_opt_ DWORD csz)
 {
-    DWORD i;
-    strcpy_s(_szBuf, MAX_PATH, sz);
-    *psz1 = _szBuf;
-    for(i = 0; i < MAX_PATH; i++) {
-        if('\0' == _szBuf[i]) {
-            *psz2 = _szBuf + i;
-            return;
+    WCHAR ch;
+    DWORD i = 0, iMax = (csz ? min(csz, MAX_PATH - 1) : (MAX_PATH - 1));
+    while((ch = sz[i]) && (i < iMax)) {
+        wszOut[i] = ((ch < 128) && (UTIL_ASCIIFILENAME_ALLOW[ch] == '0')) ? '_' : ch;
+        i++;
+    }
+    wszOut[i] = 0;
+    return i;
+}
+
+DWORD Util_PathFileNameFixW(_Out_writes_(MAX_PATH) LPWSTR wszOut, _In_ LPCWSTR wsz, _In_opt_ DWORD cwsz)
+{
+    WCHAR ch;
+    DWORD i = 0, iMax = (cwsz ? min(cwsz, MAX_PATH - 1) : (MAX_PATH - 1));
+    while((ch = wsz[i]) && (i < iMax)) {
+        wszOut[i] = ((ch < 128) && (UTIL_ASCIIFILENAME_ALLOW[ch] == '0')) ? '_' : ch;
+        i++;
+    }
+    wszOut[i] = 0;
+    return i;
+}
+
+DWORD Util_PathFileNameFix_Registry(_Out_writes_(MAX_PATH) LPWSTR wszOut, _In_opt_ LPCSTR sz, _In_opt_ LPCWSTR wsz, _In_opt_ DWORD cwsz, _In_opt_ DWORD iSuffix, _In_ BOOL fUpper)
+{
+    WCHAR ch;
+    DWORD i = 0, iMax = (cwsz ? min(cwsz, MAX_PATH - 1) : (MAX_PATH - 1));
+    if(sz || wsz) {
+        while((ch = (sz ? sz[i] : wsz[i])) && (i < iMax)) {
+            if(fUpper && ch >= 'a' && ch <= 'z') {
+                ch += 'A' - 'a';
+            } else if(ch < 128) {
+                ch = (UTIL_ASCIIFILENAME_ALLOW[ch] == '0') ? '_' : ch;
+            }
+            wszOut[i] = ch;
+            i++;
         }
-        if('\\' == _szBuf[i]) {
-            _szBuf[i] = '\0';
-            *psz2 = _szBuf + i + 1;
-            return;
+    }
+    if(iSuffix && (iSuffix < 10) && (i < MAX_PATH - 3)) {
+        wszOut[i++] = '-';
+        wszOut[i++] = '0' + (WCHAR)iSuffix;
+    }
+    wszOut[i] = 0;
+    return i;
+}
+
+QWORD Util_PathGetBaseFromW(_In_ LPWSTR wsz)
+{
+    if((wcslen(wsz) < 15) || (wsz[0] != '0') || (wsz[1] != 'x')) { return (ULONG64)-1; }
+    return wcstoull(wsz, NULL, 16);
+}
+
+LPWSTR Util_PathSplitNextW(_In_ LPWSTR wsz)
+{
+    WCHAR ch;
+    DWORD i = 0;
+    while(TRUE) {
+        ch = wsz[i++];
+        if(ch == '\0') {
+            return wsz + i - 1;
+        }
+        if(ch == '\\') {
+            return wsz + i;
         }
     }
 }
 
-VOID Util_PathSplit2_WCHAR(_In_ LPWSTR wsz, _Out_writes_(MAX_PATH) PCHAR _szBuf, _Out_ LPSTR *psz1, _Out_ LPSTR *psz2)
+LPWSTR Util_PathFileSplitW(_In_ LPWSTR wsz, _Out_writes_(MAX_PATH) LPWSTR wszPath)
+{
+    DWORD i, iBackSlash = -1;
+    WCHAR ch = -1;
+    for(i = 0; ch && i < MAX_PATH; i++) {
+        ch = wsz[i];
+        wszPath[i] = ch;
+        if(ch == '\\') {
+            iBackSlash = i;
+        }
+    }
+    wszPath[MAX_PATH - 1] = 0;
+    if(iBackSlash == -1) { return NULL; }
+    wszPath[iBackSlash] = 0;
+    return wszPath + iBackSlash + 1;
+}
+
+LPWSTR Util_PathSplit2_ExWCHAR(_In_ LPWSTR wsz, _Out_writes_(cwsz1) LPWSTR wsz1, _In_ DWORD cwsz1)
+{
+    WCHAR wch;
+    DWORD i = 0;
+    while((wch = wsz[i]) && (wch != '\\') && (i < cwsz1 - 1)) {
+        wsz1[i++] = wch;
+    }
+    wsz1[i] = 0;
+    return wsz[i] ? &wsz[i + 1] : L"";
+}
+
+int Util_wcsstrncmp(_In_ LPSTR sz, _In_ LPWSTR wsz, _In_opt_ DWORD cMax)
 {
     DWORD i;
-    for(i = 0; i < MAX_PATH; i++) {
-        _szBuf[i] = (CHAR)wsz[i];
-        if(!_szBuf[i]) { break; }
+    cMax = cMax ? cMax : (DWORD)-1;
+    for(i = 0; i < cMax; i++) {
+        if(sz[i] != wsz[i]) { return 1; }
+        if(!sz[i]) { return 0; }
     }
-    _szBuf[i] = 0;
-    *psz1 = _szBuf;
-    for(i = 0; i < MAX_PATH; i++) {
-        if('\0' == _szBuf[i]) {
-            *psz2 = _szBuf + i;
-            return;
-        }
-        if('\\' == _szBuf[i]) {
-            _szBuf[i] = '\0';
-            *psz2 = _szBuf + i + 1;
-            return;
-        }
-    }
+    return 0;
 }
 
 VOID Util_GetPathDll(_Out_writes_(MAX_PATH) PCHAR szPath, _In_opt_ HMODULE hModule)
@@ -208,7 +289,24 @@ NTSTATUS Util_VfsReadFile_FromBOOL(_In_ BOOL fValue, _Out_ PBYTE pb, _In_ DWORD 
     return Util_VfsReadFile_FromPBYTE(pbBuffer, 1, pb, cb, pcbRead, cbOffset);
 }
 
-NTSTATUS Util_VfsWriteFile_BOOL(_Inout_ PBOOL pfTarget, _In_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset)
+NTSTATUS Util_VfsWriteFile_PBYTE(_Inout_ PBYTE pbTarget, _In_ DWORD cbTarget, _In_reads_(cb) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset, _In_ BOOL fTerminatingNULL)
+{
+    if(cbOffset >= cbTarget) {
+        *pcbWrite = 0;
+        return UTIL_NTSTATUS_END_OF_FILE;
+    }
+    if(cbOffset + cb > cbTarget) {
+        cb = (DWORD)(cbTarget - cbOffset);
+    }
+    memcpy(pbTarget, pb, cb);
+    if(fTerminatingNULL) {
+        pbTarget[min(cbTarget - 1, cb)] = 0;
+    }
+    *pcbWrite = cb;
+    return UTIL_NTSTATUS_SUCCESS;
+}
+
+NTSTATUS Util_VfsWriteFile_BOOL(_Inout_ PBOOL pfTarget, _In_reads_(cb) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset)
 {
     CHAR ch;
     if((cb > 0) && (cbOffset == 0)) {
@@ -219,7 +317,7 @@ NTSTATUS Util_VfsWriteFile_BOOL(_Inout_ PBOOL pfTarget, _In_ PBYTE pb, _In_ DWOR
     return UTIL_NTSTATUS_SUCCESS;
 }
 
-NTSTATUS Util_VfsWriteFile_DWORD(_Inout_ PDWORD pdwTarget, _In_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset, _In_ DWORD dwMinAllow)
+NTSTATUS Util_VfsWriteFile_DWORD(_Inout_ PDWORD pdwTarget, _In_reads_(cb) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset, _In_ DWORD dwMinAllow)
 {
     DWORD dw;
     BYTE pbBuffer[9];

@@ -9,7 +9,73 @@
 #include "vmm.h"
 #include "vmmwin.h"
 #include "pe.h"
+#include "pdb.h"
 #include "util.h"
+#include "vmmwinreg.h"
+
+/*
+* Try initialize not yet initialized values in the optional windows kernel
+* context ctxVmm->kernel.opt
+* This function should be run once the system is fully up and running.
+* This is a best-effort function, uninitialized values will remain zero.
+*/
+VOID VmmWinInit_TryInitializeKernelOptionalValues()
+{
+    BOOL f;
+    PVMM_PROCESS pObSystemProcess = NULL;
+    POB_REGISTRY_HIVE pObHive = NULL;
+    POB_REGISTRY_KEY pObKey = NULL;
+    POB_MAP pmObSubkeys = NULL;
+    DWORD oKdpDataBlockEncoded, dwKDBG, dwo;
+    BYTE bKdpDataBlockEncoded;
+    if(ctxVmm->kernel.opt.fInitialized) { return; }
+    if(!(pObSystemProcess = VmmProcessGet(4))) { return; }
+    // optional eprocess offsets
+    if(!ctxVmm->kernel.OffsetEPROCESS.opt.fFailInitialize && !ctxVmm->kernel.OffsetEPROCESS.opt.CreateTime) {
+        if(PDB_GetTypeChildOffset(VMMWIN_PDB_HANDLE_KERNEL, "_EPROCESS", L"CreateTime", &dwo) && (dwo < sizeof(((PVMM_PROCESS)0)->win.EPROCESS.cb) - 8)) {
+            ctxVmm->kernel.OffsetEPROCESS.opt.CreateTime = (WORD)dwo;
+        }
+        if(PDB_GetTypeChildOffset(VMMWIN_PDB_HANDLE_KERNEL, "_EPROCESS", L"ExitTime", &dwo) && (dwo < sizeof(((PVMM_PROCESS)0)->win.EPROCESS.cb) - 8)) {
+            ctxVmm->kernel.OffsetEPROCESS.opt.ExitTime = (WORD)dwo;
+        }
+    }
+    // cpu count
+    if(!ctxVmm->kernel.opt.cCPUs) {
+        PDB_GetSymbolDWORD(VMMWIN_PDB_HANDLE_KERNEL, "KiTotalCpuSetCount", pObSystemProcess, &ctxVmm->kernel.opt.cCPUs);
+        if(ctxVmm->kernel.opt.cCPUs > 128) { ctxVmm->kernel.opt.cCPUs = 0; }
+    }
+    if(!ctxVmm->kernel.opt.cCPUs && VmmWinReg_KeyHiveGetByFullPath(L"HKLM\\HARDWARE\\DESCRIPTION\\System\\CentralProcessor", &pObHive, &pObKey)) {
+        pmObSubkeys = VmmWinReg_KeyList(pObHive, pObKey);
+        ctxVmm->kernel.opt.cCPUs = ObMap_Size(pmObSubkeys);
+    }
+    // pfn database
+    if(!ctxVmm->kernel.opt.vaPfnDatabase) {
+        PDB_GetSymbolPTR(VMMWIN_PDB_HANDLE_KERNEL, "MmPfnDatabase", pObSystemProcess, &ctxVmm->kernel.opt.vaPfnDatabase);
+    }
+    // PsLoadedModuleListExp
+    if(!ctxVmm->kernel.opt.vaPsLoadedModuleListExp) {
+        PDB_GetSymbolAddress(VMMWIN_PDB_HANDLE_KERNEL, "PsLoadedModuleList", &ctxVmm->kernel.opt.vaPsLoadedModuleListExp);
+    }
+    // KdDebuggerDataBlock (KDBG)
+    if(!ctxVmm->kernel.opt.KDBG.va && PDB_GetSymbolAddress(VMMWIN_PDB_HANDLE_KERNEL, "KdDebuggerDataBlock", &ctxVmm->kernel.opt.KDBG.va)) {
+        f = !ctxVmm->f32 &&
+            VmmRead(pObSystemProcess, ctxVmm->kernel.opt.KDBG.va + 0x10, (PBYTE)&dwKDBG, sizeof(DWORD)) && (dwKDBG != 0x4742444b) &&
+            PDB_GetSymbolOffset(VMMWIN_PDB_HANDLE_KERNEL, "KdpDataBlockEncoded", &oKdpDataBlockEncoded) &&
+            PDB_GetSymbolPBYTE(VMMWIN_PDB_HANDLE_KERNEL, "KdpDataBlockEncoded", pObSystemProcess, &bKdpDataBlockEncoded, 1) &&
+            (bKdpDataBlockEncoded == 1);
+        if(f) {
+            ctxVmm->kernel.opt.KDBG.vaKdpDataBlockEncoded = ctxVmm->kernel.vaBase + oKdpDataBlockEncoded;
+            PDB_GetSymbolQWORD(VMMWIN_PDB_HANDLE_KERNEL, "KiWaitAlways", pObSystemProcess, &ctxVmm->kernel.opt.KDBG.qwKiWaitAlways);
+            PDB_GetSymbolQWORD(VMMWIN_PDB_HANDLE_KERNEL, "KiWaitNever", pObSystemProcess, &ctxVmm->kernel.opt.KDBG.qwKiWaitNever);
+        }
+    }
+    // Cleanup
+    Ob_DECREF(pObKey);
+    Ob_DECREF(pObHive);
+    Ob_DECREF(pmObSubkeys);
+    Ob_DECREF(pObSystemProcess);
+    ctxVmm->kernel.opt.fInitialized = TRUE;
+}
 
 /*
 * Scan a page table hierarchy between virtual addresses between vaMin and vaMax
@@ -155,7 +221,7 @@ cleanup:
 */
 DWORD VmmWinInit_FindNtosScan32(_In_ PVMM_PROCESS pSystemProcess)
 {
-    DWORD o, p;
+    DWORD o, p, vaNtosTry = 0;
     PBYTE pb;
     CHAR szModuleName[MAX_PATH] = { 0 };
     if(!(pb = LocalAlloc(LMEM_ZEROINIT, 0x04000000))) { return 0; }
@@ -166,18 +232,21 @@ DWORD VmmWinInit_FindNtosScan32(_In_ PVMM_PROCESS pSystemProcess)
         }
         // check for (1) MZ header, (2) POOLCODE section, (3) ntoskrnl.exe module name
         if(*(PWORD)(pb + p) != 0x5a4d) { continue; } // MZ header
-        for(o = 0; o < 0x1000; o += 8) {
+        for(o = 0; o < 0x800; o += 8) {
             if(*(PQWORD)(pb + p + o) == 0x45444F434C4F4F50) { // POOLCODE
-                PE_GetModuleNameEx(pSystemProcess, 0x80000000ULL + p, FALSE, pb + p, szModuleName, _countof(szModuleName), NULL);
-                if(!_stricmp(szModuleName, "ntoskrnl.exe")) {
-                    LocalFree(pb);
-                    return 0x80000000 + p;
+                if(PE_GetModuleNameEx(pSystemProcess, 0x80000000ULL + p, FALSE, pb + p, szModuleName, _countof(szModuleName), NULL)) {
+                    if(!_stricmp(szModuleName, "ntoskrnl.exe")) {
+                        LocalFree(pb);
+                        return 0x80000000 + p;
+                    }
+                } else {
+                    vaNtosTry = 0x80000000 + p;
                 }
             }
         }
     }
     LocalFree(pb);
-    return 0;
+    return vaNtosTry;      // on fail try return NtosTry derived from MZ + POOLCODE only.
 }
 
 /*
@@ -191,7 +260,7 @@ PVMM_PROCESS VmmWinInit_FindNtosScan()
     QWORD vaKernelBase = 0, cbKernelSize, vaKernelHint;
     PVMM_PROCESS pObSystemProcess = NULL;
     // 1: Pre-initialize System PID (required by VMM)
-    pObSystemProcess = VmmProcessCreateEntry(TRUE, 4, 0, 0, ctxVmm->kernel.paDTB, 0, "System", FALSE);
+    pObSystemProcess = VmmProcessCreateEntry(TRUE, 4, 0, 0, ctxVmm->kernel.paDTB, 0, "System", FALSE, NULL, 0);
     if(!pObSystemProcess) { return NULL; }
     VmmProcessCreateFinish();
     // 2: Spider DTB to speed things up.
@@ -406,25 +475,37 @@ BOOL VmmWinInit_FindPsLoadedModuleListKDBG(_In_ PVMM_PROCESS pSystemProcess)
     // 1: Try locate 'PsLoadedModuleList' by querying the microsoft crash dump
     //    file used. This will fail if another memory acqusition device is used.
     if(LeechCore_GetOption(LEECHCORE_OPT_MEMORYINFO_OS_PsLoadedModuleList, &va) && va) {
+        LeechCore_GetOption(LEECHCORE_OPT_MEMORYINFO_OS_PFN, &ctxVmm->kernel.opt.vaPfnDatabase);
+        LeechCore_GetOption(LEECHCORE_OPT_MEMORYINFO_OS_KdDebuggerDataBlock, &ctxVmm->kernel.opt.KDBG.va);
         if(ctxVmm->f32 && VmmRead(pSystemProcess, va, (PBYTE)&va32, 4) && (va32 > 0x80000000)) {
-            ctxVmm->kernel.vaPsLoadedModuleList = va32;
+            ctxVmm->kernel.opt.vaPsLoadedModuleListExp = va;
+            ctxVmm->kernel.vaPsLoadedModuleListPtr = va32;
             return TRUE;
         }
         if(!ctxVmm->f32 && VmmRead(pSystemProcess, va, (PBYTE)&va64, 8) && (va64 > 0xffff800000000000)) {
-            ctxVmm->kernel.vaPsLoadedModuleList = va64;
+            ctxVmm->kernel.opt.vaPsLoadedModuleListExp = va;
+            ctxVmm->kernel.vaPsLoadedModuleListPtr = va64;
             return TRUE;
         }
     }
+    //    (optionally) Locate the PFN database:
+    //    The PFN database is static on before Windows 10 x64 1607/14393.
+    if(!ctxVmm->f32 && (ctxVmm->kernel.dwVersionBuild < 14393)) {
+        ctxVmm->kernel.opt.vaPfnDatabase = 0xfffffa80'00000000;
+    }
     // 2: Try locate 'PsLoadedModuleList' by exported kernel symbol. If this is
-    //    possible it's most probably Windows 10 and KDBG will be encrypted so
-    //    no need to continue looking for it.
-    ctxVmm->kernel.vaPsLoadedModuleList = PE_GetProcAddress(pSystemProcess, ctxVmm->kernel.vaBase, "PsLoadedModuleList");
-    if(ctxVmm->kernel.vaPsLoadedModuleList) { return TRUE; }
+    //    possible _and_ the system is 64-bit it's most probably Windows 10 and
+    //    KDBG will be encrypted so no need to continue looking for it.
+    ctxVmm->kernel.vaPsLoadedModuleListPtr = PE_GetProcAddress(pSystemProcess, ctxVmm->kernel.vaBase, "PsLoadedModuleList");
+    if(ctxVmm->kernel.vaPsLoadedModuleListPtr && !ctxVmm->f32) {
+        ctxVmm->kernel.opt.vaPsLoadedModuleListExp = ctxVmm->kernel.vaPsLoadedModuleListPtr;
+        return TRUE;
+    }
     // 3: Try locate 'KDBG' by looking in 'ntoskrnl.exe' '.text' section. This
     //    is the normal way of finding it on 64-bit Windows below Windows 10.
     //    This also works on 32-bit Windows versions - so use this method for
     //    simplicity rather than using a separate 32-bit method.
-    if(!ctxVmm->kernel.vaKDBG) {
+    if(!ctxVmm->kernel.opt.KDBG.va) {
         if(!PE_SectionGetFromName(pSystemProcess, ctxVmm->kernel.vaBase, ".data", &SectionHeader)) { goto fail; }
         if((SectionHeader.Misc.VirtualSize > 0x00100000) || (SectionHeader.VirtualAddress > 0x01000000)) { goto fail; }
         if(!(pbData = LocalAlloc(LMEM_ZEROINIT, SectionHeader.Misc.VirtualSize))) { goto fail; }
@@ -436,9 +517,10 @@ BOOL VmmWinInit_FindPsLoadedModuleListKDBG(_In_ PVMM_PROCESS pSystemProcess)
                 // fetch PsLoadedModuleList
                 va = *(PQWORD)(pbKDBG + 0x48);
                 if((va < ctxVmm->kernel.vaBase) || (va > ctxVmm->kernel.vaBase + ctxVmm->kernel.cbSize)) { goto fail; }
-                if(!VmmRead(pSystemProcess, va, (PBYTE)&ctxVmm->kernel.vaPsLoadedModuleList, ctxVmm->f32 ? 4 : 8)) { goto fail; }
+                if(!VmmRead(pSystemProcess, va, (PBYTE)&ctxVmm->kernel.vaPsLoadedModuleListPtr, ctxVmm->f32 ? 4 : 8)) { goto fail; }
+                ctxVmm->kernel.opt.vaPsLoadedModuleListExp = va;
                 // finish!
-                ctxVmm->kernel.vaKDBG = ctxVmm->kernel.vaBase + SectionHeader.VirtualAddress + o - 16;
+                ctxVmm->kernel.opt.KDBG.va = ctxVmm->kernel.vaBase + SectionHeader.VirtualAddress + o - 16;
                 LocalFree(pbData);
                 return TRUE;
             }
@@ -446,7 +528,7 @@ BOOL VmmWinInit_FindPsLoadedModuleListKDBG(_In_ PVMM_PROCESS pSystemProcess)
     }
 fail:
     LocalFree(pbData);
-    return FALSE;
+    return (0 != ctxVmm->kernel.vaPsLoadedModuleListPtr);
 }
 
 /*
@@ -457,8 +539,19 @@ fail:
 */
 VOID VmmWinInit_VersionNumber(_In_ PVMM_PROCESS pProcessSMSS)
 {
+    BOOL fRead;
     BYTE pbPEB[0x130];
-    if(VmmRead(pProcessSMSS, pProcessSMSS->win.vaPEB, pbPEB, 0x130)) {
+    PVMM_PROCESS pObProcess = NULL;
+    fRead = VmmRead(pProcessSMSS, pProcessSMSS->win.vaPEB, pbPEB, 0x130);
+    if(!fRead) { // failed (paging?) - try to read from crss.exe / lsass.exe / winlogon.exe
+        while((pObProcess = VmmProcessGetNext(pObProcess, 0))) {
+            if(!strcmp("crss.exe", pObProcess->szName) || !strcmp("lsass.exe", pObProcess->szName) || !strcmp("winlogon.exe", pObProcess->szName)) {
+                if((fRead = VmmRead(pObProcess, pObProcess->win.vaPEB, pbPEB, 0x130))) { break; }
+            }
+        }
+        Ob_DECREF_NULL(&pObProcess);
+    }
+    if(fRead) {
         if(ctxVmm->f32) {
             ctxVmm->kernel.dwVersionMajor = *(PDWORD)(pbPEB + 0x0a4);
             ctxVmm->kernel.dwVersionMinor = *(PDWORD)(pbPEB + 0x0a8);
@@ -472,6 +565,47 @@ VOID VmmWinInit_VersionNumber(_In_ PVMM_PROCESS pProcessSMSS)
 }
 
 /*
+* Helper fucntion to VmmWinInit_TryInitialize. Tries to locate the EPROCESS of
+* the SYSTEM process and return it.
+* -- pSystemProcess
+* -- return
+*/
+QWORD VmmWinInit_FindSystemEPROCESS(_In_ PVMM_PROCESS pSystemProcess)
+{
+    BOOL f32 = ctxVmm->f32;
+    IMAGE_SECTION_HEADER SectionHeader;
+    BYTE pbALMOSTRO[0x80], pbSYSTEM[0x300];
+    QWORD i, vaPsInitialSystemProcess, vaSystemEPROCESS;
+    // 1: try locate System EPROCESS by PsInitialSystemProcess exported symbol (works on all win versions)
+    vaPsInitialSystemProcess = PE_GetProcAddress(pSystemProcess, ctxVmm->kernel.vaBase, "PsInitialSystemProcess");
+    if(VmmRead(pSystemProcess, vaPsInitialSystemProcess, (PBYTE)& vaSystemEPROCESS, 8)) {
+        if((VMM_MEMORYMODEL_X86 == ctxVmm->tpMemoryModel) || (VMM_MEMORYMODEL_X86PAE == ctxVmm->tpMemoryModel)) {
+            vaSystemEPROCESS &= 0xffffffff;
+        }
+        pSystemProcess->win.EPROCESS.va = vaSystemEPROCESS;
+        vmmprintfvv_fn("INFO: PsInitialSystemProcess located at %016llx.\n", vaPsInitialSystemProcess);
+        goto success;
+    }
+    // 2: fail - paging? (or not windows) - this should ideally not happen - but it happens rarely...
+    //    try scan beginning of ALMOSTRO section for pointers and validate (working on pre-win10 only)
+    if(!PE_SectionGetFromName(pSystemProcess, ctxVmm->kernel.vaBase, "ALMOSTRO", &SectionHeader)) { return 0; }
+    if(!VmmRead(pSystemProcess, ctxVmm->kernel.vaBase + SectionHeader.VirtualAddress, pbALMOSTRO, sizeof(pbALMOSTRO))) { return 0; }
+    for(i = 0; i < sizeof(pbALMOSTRO); i += f32 ? 4 : 8) {
+        vaSystemEPROCESS = f32 ? *(PDWORD)(pbALMOSTRO + i) : *(PQWORD)(pbALMOSTRO + i);
+        if(f32 ? VMM_KADDR32_8(vaSystemEPROCESS) : VMM_KADDR64_16(vaSystemEPROCESS)) {
+            if(VmmRead(pSystemProcess, vaSystemEPROCESS, pbSYSTEM, sizeof(pbSYSTEM))) {
+                if(f32 && ((*(PDWORD)(pbSYSTEM + 0x18) & ~0xf) == ctxVmm->kernel.paDTB)) { goto success; }      // 32-bit EPROCESS DTB at fixed offset
+                if(!f32 && ((*(PQWORD)(pbSYSTEM + 0x28) & ~0xf) == ctxVmm->kernel.paDTB)) { goto success; }     // 64-bit EPROCESS DTB at fixed offset
+            }
+        }
+    }
+    return 0;
+success:
+    vmmprintfvv_fn("INFO: EPROCESS located at %016llx.\n", vaSystemEPROCESS);
+    return vaSystemEPROCESS;
+}
+
+/*
 * Try initialize the VMM from scratch with new WINDOWS support.
 * -- paDTBOpt
 * -- return
@@ -479,7 +613,6 @@ VOID VmmWinInit_VersionNumber(_In_ PVMM_PROCESS pProcessSMSS)
 BOOL VmmWinInit_TryInitialize(_In_opt_ QWORD paDTBOpt)
 {
     PVMM_PROCESS pObSystemProcess = NULL, pObProcess = NULL;
-    QWORD vaPsInitialSystemProcess, vaSystemEPROCESS;
     // Fetch Directory Base (DTB (PML4)) and initialize Memory Model.
     if(paDTBOpt) {
         if(!VmmWinInit_DTB_Validate(paDTBOpt)) {
@@ -505,33 +638,24 @@ BOOL VmmWinInit_TryInitialize(_In_opt_ QWORD paDTBOpt)
     }
     vmmprintfvv_fn("INFO: NTOS located at: %016llx.\n", ctxVmm->kernel.vaBase);
     // Locate System EPROCESS
-    vaPsInitialSystemProcess = PE_GetProcAddress(pObSystemProcess, ctxVmm->kernel.vaBase, "PsInitialSystemProcess");
-    if(!VmmRead(pObSystemProcess, vaPsInitialSystemProcess, (PBYTE)&vaSystemEPROCESS, 8)) {
-        vmmprintfv("VmmWinInit_TryInitialize: Initialization Failed. Unable to locate EPROCESS. #4\n");
+    pObSystemProcess->win.EPROCESS.va = VmmWinInit_FindSystemEPROCESS(pObSystemProcess);
+    if(!pObSystemProcess->win.EPROCESS.va) {
+        vmmprintfv_fn("Initialization Failed. Unable to locate EPROCESS. #4\n");
         goto fail;
     }
-    if((VMM_MEMORYMODEL_X86 == ctxVmm->tpMemoryModel) || (VMM_MEMORYMODEL_X86PAE == ctxVmm->tpMemoryModel)) {
-        vaSystemEPROCESS &= 0xffffffff;
-    }
-    pObSystemProcess->win.vaEPROCESS = vaSystemEPROCESS;
-    vmmprintfvv_fn("INFO: PsInitialSystemProcess located at %016llx.\n", vaPsInitialSystemProcess);
-    vmmprintfvv_fn("INFO: EPROCESS located at %016llx.\n", vaSystemEPROCESS);
     // Enumerate processes
     if(!VmmWin_EnumerateEPROCESS(pObSystemProcess, TRUE)) {
         vmmprintfv("VmmWinInit: Initialization Failed. Unable to walk EPROCESS. #5\n");
         goto fail;
     }
     ctxVmm->tpSystem = (VMM_MEMORYMODEL_X64 == ctxVmm->tpMemoryModel) ? VMM_SYSTEM_WINDOWS_X64 : VMM_SYSTEM_WINDOWS_X86;
-    // Optionally fetch PsLoadedModuleList / KDBG
-    VmmWinInit_FindPsLoadedModuleListKDBG(pObSystemProcess);
-    Ob_DECREF(pObSystemProcess);
     // Retrieve operating system version information from 'smss.exe' process
     // Optionally retrieve PID of MemCompression and Registry process
     while((pObProcess = VmmProcessGetNext(pObProcess, 0))) {
         if(pObProcess->dwPPID == 4) {
             if(!memcmp("MemCompression", pObProcess->szName, 15)) {
                 ctxVmm->kernel.MemCompress.dwPid = pObProcess->dwPID;
-                ctxVmm->kernel.MemCompress.vaEPROCESS = pObProcess->win.vaEPROCESS;
+                ctxVmm->kernel.MemCompress.vaEPROCESS = pObProcess->win.EPROCESS.va;
             }
             if(!memcmp("Registry", pObProcess->szName, 9)) {
                 ctxVmm->kernel.dwPidRegistry = pObProcess->dwPID;
@@ -541,6 +665,12 @@ BOOL VmmWinInit_TryInitialize(_In_opt_ QWORD paDTBOpt)
             }
         }
     }
+    // Optionally fetch PsLoadedModuleList / KDBG
+    VmmWinInit_FindPsLoadedModuleListKDBG(pObSystemProcess);
+    Ob_DECREF(pObSystemProcess);
+    // Initialize PDB and Registry
+    PDB_Initialize();
+    VmmWinReg_Initialize();
     // return
     vmmprintf(
         "Initialized %i-bit Windows %i.%i.%i\n",

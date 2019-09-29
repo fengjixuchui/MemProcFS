@@ -5,78 +5,88 @@
 //
 #include "vmm.h"
 #include "vmmdll.h"
+#include "m_vmmvfs_dump.h"
 #include "pluginmanager.h"
 #include "vmmproc.h"
 #include "vmmwin.h"
 #include "util.h"
 
 typedef struct tdVMMVFS_PATH {
-    CHAR _sz[MAX_PATH];
+    WCHAR _wsz[MAX_PATH];
     BOOL fRoot;
     BOOL fNamePID;
     DWORD dwPID;
-    LPSTR szPath1;
-    LPSTR szPath2;
+    LPWSTR wszPath1;
+    LPWSTR wszPath2;
 } VMMVFS_PATH, *PVMMVFS_PATH;
 
 BOOL VmmVfs_UtilVmmGetPidDirFile(_In_ LPCWSTR wcsFileName, _Out_ PVMMVFS_PATH pPath)
 {
     DWORD i = 0, iPID, iPath1 = 0, iPath2 = 0;
-    // 1: convert to ascii string
     ZeroMemory(pPath, sizeof(VMMVFS_PATH));
-    while(TRUE) {
-        if(i >= MAX_PATH) { return FALSE; }
-        if(wcsFileName[i] > 255) { return FALSE; }
-        pPath->_sz[i] = (CHAR)wcsFileName[i];
-        if(wcsFileName[i] == 0) { break; }
-        i++;
-    }
+    wcsncpy_s(pPath->_wsz, MAX_PATH, wcsFileName, _TRUNCATE);
     // 1: Check for root only item
-    pPath->fNamePID = !_stricmp(pPath->_sz, "\\name");
-    pPath->fRoot = pPath->fNamePID || !_stricmp(pPath->_sz, "\\pid");
+    pPath->fNamePID = !_wcsicmp(pPath->_wsz, L"\\name");
+    pPath->fRoot = pPath->fNamePID || !_wcsicmp(pPath->_wsz, L"\\pid");
     if(pPath->fRoot) { return TRUE; }
     // 2: Check if starting with PID or NAME and move start index
-    if(!strncmp(pPath->_sz, "\\pid\\", 5)) { i = 5; }
-    if(!strncmp(pPath->_sz, "\\name\\", 6)) { i = 6; }
+    if(!wcsncmp(pPath->_wsz, L"\\pid\\", 5)) { i = 5; }
+    if(!wcsncmp(pPath->_wsz, L"\\name\\", 6)) { i = 6; }
     if(i == 0) { return FALSE; }
     // 3: Locate start of PID number and 1st Path item (if any)
-    while((i < MAX_PATH) && pPath->_sz[i] && (pPath->_sz[i] != '\\')) { i++; }
-    if(pPath->_sz[i]) { iPath1 = i + 1; }
-    pPath->_sz[i] = 0;
+    while((i < MAX_PATH) && pPath->_wsz[i] && (pPath->_wsz[i] != '\\')) { i++; }
+    if(pPath->_wsz[i]) { iPath1 = i + 1; }
+    pPath->_wsz[i] = 0;
     i--;
-    while((i > 0) && (pPath->_sz[i] >= '0') && (pPath->_sz[i] <= '9')) { i--; }
+    while((i > 0) && (pPath->_wsz[i] >= '0') && (pPath->_wsz[i] <= '9')) { i--; }
     iPID = i + 1;
-    pPath->dwPID = (DWORD)Util_GetNumeric(&pPath->_sz[iPID]);
+    pPath->dwPID = (DWORD)Util_GetNumericW(&pPath->_wsz[iPID]);
     if(!iPath1) { return TRUE; }
     // 4: Locate 2nd Path item (if any)
     i = iPath1;
-    while((i < MAX_PATH) && pPath->_sz[i] && (pPath->_sz[i] != '\\')) { i++; }
-    if(pPath->_sz[i]) {
+    while((i < MAX_PATH) && pPath->_wsz[i] && (pPath->_wsz[i] != '\\')) { i++; }
+    if(pPath->_wsz[i]) {
         iPath2 = i + 1;
-        pPath->_sz[i] = 0;
+        pPath->_wsz[i] = 0;
     }
     // 7: Finish
-    pPath->szPath1 = &pPath->_sz[iPath1];
+    pPath->wszPath1 = &pPath->_wsz[iPath1];
     if(iPath2) {
-        pPath->szPath2 = &pPath->_sz[iPath2];
+        pPath->wszPath2 = &pPath->_wsz[iPath2];
     }
     return TRUE;
+}
+
+/*
+* Set file timestamp into the ExInfo struct if possible.
+* -- pProcess
+* -- pExInfo
+*/
+VOID VmmVfs_UtilTimeStampFile(_In_opt_ PVMM_PROCESS pProcess, _Out_ PVMMDLL_VFS_FILELIST_EXINFO pExInfo)
+{
+    pExInfo->dwVersion = VMMDLL_VFS_FILELIST_EXINFO_VERSION;
+    pExInfo->fCompressed = pProcess && pProcess->dwState;
+    pExInfo->qwCreationTime = VmmProcess_GetCreateTimeOpt(pProcess);
+    pExInfo->qwLastWriteTime = (pProcess && pProcess->dwState) ? VmmProcess_GetExitTimeOpt(pProcess) : 0;
+    if(!pExInfo->qwLastWriteTime) {
+        pExInfo->qwLastWriteTime = pExInfo->qwCreationTime;
+    }
 }
 
 // ----------------------------------------------------------------------------
 // FUNCTIONALITY RELATED TO: READ
 // ----------------------------------------------------------------------------
 
-NTSTATUS VmmVfsReadFileProcess(_In_ PVMM_PROCESS pProcess, _In_ PVMMVFS_PATH pPath, _Out_ LPVOID pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
+NTSTATUS VmmVfsReadFileProcess(_In_ PVMM_PROCESS pProcess, _In_ PVMMVFS_PATH pPath, _Out_writes_(cb) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
 {
     NTSTATUS nt;
     BYTE pbBuffer[0x800];
     DWORD cbBuffer;
-    PVMMOB_PDATA pObMemMapDisplay = NULL;
+    PVMMOB_DATA pObMemMapDisplay = NULL;
     PVMMOB_MODULEMAP pObModuleMap = NULL;
     ZeroMemory(pbBuffer, 48);
     // read memory from "vmem" file
-    if(!_stricmp(pPath->szPath1, "vmem")) {
+    if(!_wcsicmp(pPath->wszPath1, L"vmem")) {
         if((ctxVmm->tpMemoryModel != VMM_MEMORYMODEL_X64) && (cbOffset + cb >= 0x100000000)) {
             if(cbOffset >= 0x100000000) { return VMM_STATUS_END_OF_FILE; }
             cb = (DWORD)(0x100000000 - cbOffset);
@@ -86,55 +96,55 @@ NTSTATUS VmmVfsReadFileProcess(_In_ PVMM_PROCESS pProcess, _In_ PVMMVFS_PATH pPa
         return VMM_STATUS_SUCCESS;
     }
     // read the memory map
-    if(!_stricmp(pPath->szPath1, "map")) {
+    if(!_wcsicmp(pPath->wszPath1, L"map")) {
         if(!VmmMemMapGetDisplay(pProcess, VMM_MEMMAP_FLAG_ALL, &pObMemMapDisplay)) { return VMMDLL_STATUS_FILE_INVALID; }
-        nt = Util_VfsReadFile_FromPBYTE(pObMemMapDisplay->pbData, pObMemMapDisplay->cbData, pb, cb, pcbRead, cbOffset);
+        nt = Util_VfsReadFile_FromPBYTE(pObMemMapDisplay->pbData, pObMemMapDisplay->ObHdr.cbData, pb, cb, pcbRead, cbOffset);
         Ob_DECREF(pObMemMapDisplay);
         return nt;
     }
     // read genereal numeric values from files, pml4, pid, name, virt
-    if(!_stricmp(pPath->szPath1, "dtb")) {
+    if(!_wcsicmp(pPath->wszPath1, L"dtb")) {
         if(ctxVmm->tpMemoryModel == VMM_MEMORYMODEL_X64) {
             return Util_VfsReadFile_FromQWORD(pProcess->paDTB, pb, cb, pcbRead, cbOffset, FALSE);
         } else if((ctxVmm->tpMemoryModel == VMM_MEMORYMODEL_X86) || (ctxVmm->tpMemoryModel == VMM_MEMORYMODEL_X86PAE)) {
             return Util_VfsReadFile_FromDWORD((DWORD)pProcess->paDTB, pb, cb, pcbRead, cbOffset, FALSE);
         }
     }
-    if(!_stricmp(pPath->szPath1, "dtb-user")) {
+    if(!_wcsicmp(pPath->wszPath1, L"dtb-user")) {
         if(ctxVmm->tpMemoryModel == VMM_MEMORYMODEL_X64) {
             return Util_VfsReadFile_FromQWORD(pProcess->paDTB_UserOpt, pb, cb, pcbRead, cbOffset, FALSE);
         } else if((ctxVmm->tpMemoryModel == VMM_MEMORYMODEL_X86) || (ctxVmm->tpMemoryModel == VMM_MEMORYMODEL_X86PAE)) {
             return Util_VfsReadFile_FromDWORD((DWORD)pProcess->paDTB_UserOpt, pb, cb, pcbRead, cbOffset, FALSE);
         }
     }
-    if(!_stricmp(pPath->szPath1, "pid")) {
+    if(!_wcsicmp(pPath->wszPath1, L"pid")) {
         cbBuffer = snprintf(pbBuffer, 32, "%i", pProcess->dwPID);
         return Util_VfsReadFile_FromPBYTE(pbBuffer, cbBuffer, pb, cb, pcbRead, cbOffset);
     }
-    if(!_stricmp(pPath->szPath1, "ppid")) {
+    if(!_wcsicmp(pPath->wszPath1, L"ppid")) {
         cbBuffer = snprintf(pbBuffer, 32, "%i", pProcess->dwPPID);
         return Util_VfsReadFile_FromPBYTE(pbBuffer, cbBuffer, pb, cb, pcbRead, cbOffset);
     }
-    if(!_stricmp(pPath->szPath1, "state")) {
+    if(!_wcsicmp(pPath->wszPath1, L"state")) {
         cbBuffer = snprintf(pbBuffer, 32, "%i", pProcess->dwState);
         return Util_VfsReadFile_FromPBYTE(pbBuffer, cbBuffer, pb, cb, pcbRead, cbOffset);
     }
-    if(!_stricmp(pPath->szPath1, "name")) {
+    if(!_wcsicmp(pPath->wszPath1, L"name")) {
         cbBuffer = snprintf(pbBuffer, 32, "%s", pProcess->szName);
         return Util_VfsReadFile_FromPBYTE(pbBuffer, cbBuffer, pb, cb, pcbRead, cbOffset);
     }
     // windows specific reads below:
     if((ctxVmm->tpSystem == VMM_SYSTEM_WINDOWS_X64) || (ctxVmm->tpSystem == VMM_SYSTEM_WINDOWS_X86)) {
-        if(!_stricmp(pPath->szPath1, "name-long")) {
+        if(!_wcsicmp(pPath->wszPath1, L"name-long")) {
             return Util_VfsReadFile_FromPBYTE(pProcess->pObProcessPersistent->szNameLong, pProcess->pObProcessPersistent->cchNameLong, pb, cb, pcbRead, cbOffset);
         }
-        if(!_stricmp(pPath->szPath1, "win-cmdline")) {
+        if(!_wcsicmp(pPath->wszPath1, L"win-cmdline")) {
             return Util_VfsReadFile_FromPBYTE(pProcess->pObProcessPersistent->UserProcessParams.szCommandLine, pProcess->pObProcessPersistent->UserProcessParams.cchCommandLine, pb, cb, pcbRead, cbOffset);
         }
-        if(!_stricmp(pPath->szPath1, "win-path")) {
+        if(!_wcsicmp(pPath->wszPath1, L"win-path")) {
             return Util_VfsReadFile_FromPBYTE(pProcess->pObProcessPersistent->szPathKernel, pProcess->pObProcessPersistent->cchPathKernel, pb, cb, pcbRead, cbOffset);
         }
-        if(!_stricmp(pPath->szPath1, "win-modules") && VmmProc_ModuleMapGet(pProcess, &pObModuleMap)) {
+        if(!_wcsicmp(pPath->wszPath1, L"win-modules") && VmmProc_ModuleMapGet(pProcess, &pObModuleMap)) {
             nt = Util_VfsReadFile_FromPBYTE(pObModuleMap->pbDisplay, pObModuleMap->cbDisplay, pb, cb, pcbRead, cbOffset);
             Ob_DECREF_NULL(&pObModuleMap);
             return nt;
@@ -142,47 +152,42 @@ NTSTATUS VmmVfsReadFileProcess(_In_ PVMM_PROCESS pProcess, _In_ PVMMVFS_PATH pPa
 
     }
     if(ctxVmm->tpSystem == VMM_SYSTEM_WINDOWS_X64) {
-        if(!_stricmp(pPath->szPath1, "win-eprocess")) {
-            return Util_VfsReadFile_FromQWORD(pProcess->win.vaEPROCESS, pb, cb, pcbRead, cbOffset, FALSE);
+        if(!_wcsicmp(pPath->wszPath1, L"win-eprocess")) {
+            return Util_VfsReadFile_FromQWORD(pProcess->win.EPROCESS.va, pb, cb, pcbRead, cbOffset, FALSE);
         }
-        if(!_stricmp(pPath->szPath1, "win-entry")) {
+        if(!_wcsicmp(pPath->wszPath1, L"win-entry")) {
             return Util_VfsReadFile_FromQWORD(pProcess->win.vaENTRY, pb, cb, pcbRead, cbOffset, FALSE);
         }
-        if(!_stricmp(pPath->szPath1, "win-peb")) {
+        if(!_wcsicmp(pPath->wszPath1, L"win-peb")) {
             return Util_VfsReadFile_FromQWORD(pProcess->win.vaPEB, pb, cb, pcbRead, cbOffset, FALSE);
         }
-        if(!_stricmp(pPath->szPath1, "win-peb32")) {
+        if(!_wcsicmp(pPath->wszPath1, L"win-peb32")) {
             return Util_VfsReadFile_FromDWORD(pProcess->win.vaPEB32, pb, cb, pcbRead, cbOffset, FALSE);
         }
     }
     if(ctxVmm->tpSystem == VMM_SYSTEM_WINDOWS_X86) {
-        if(!_stricmp(pPath->szPath1, "win-eprocess")) {
-            return Util_VfsReadFile_FromDWORD((DWORD)pProcess->win.vaEPROCESS, pb, cb, pcbRead, cbOffset, FALSE);
+        if(!_wcsicmp(pPath->wszPath1, L"win-eprocess")) {
+            return Util_VfsReadFile_FromDWORD((DWORD)pProcess->win.EPROCESS.va, pb, cb, pcbRead, cbOffset, FALSE);
         }
-        if(!_stricmp(pPath->szPath1, "win-entry")) {
+        if(!_wcsicmp(pPath->wszPath1, L"win-entry")) {
             return Util_VfsReadFile_FromDWORD((DWORD)pProcess->win.vaENTRY, pb, cb, pcbRead, cbOffset, FALSE);
         }
-        if(!_stricmp(pPath->szPath1, "win-peb")) {
+        if(!_wcsicmp(pPath->wszPath1, L"win-peb")) {
             return Util_VfsReadFile_FromDWORD((DWORD)pProcess->win.vaPEB, pb, cb, pcbRead, cbOffset, FALSE);
         }
     }
     // no hit - call down the loadable modules chain for potential hits
-    return PluginManager_Read(pProcess, pPath->szPath1, pPath->szPath2, pb, cb, pcbRead, cbOffset);
+    return PluginManager_Read(pProcess, pPath->wszPath1, pPath->wszPath2, pb, cb, pcbRead, cbOffset);
 }
 
-NTSTATUS VmmVfs_Read(LPCWSTR wcsFileName, _Out_ LPVOID pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
+NTSTATUS VmmVfs_Read(LPCWSTR wcsFileName, _Out_writes_(cb) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
 {
     NTSTATUS nt = VMM_STATUS_FILE_INVALID;
     VMMVFS_PATH path;
-    CHAR _szBuf[MAX_PATH];
-    LPSTR szModule, szModulePath;
+    WCHAR wszModule[32];
+    LPWSTR wszModulePath;
     PVMM_PROCESS pObProcess;
     if(!ctxVmm) { return nt; }
-    // read '\\pmem' - physical memory file:
-    if(!_wcsicmp(wcsFileName, L"\\pmem")) {
-        VmmReadEx(NULL, cbOffset, pb, cb, pcbRead, VMM_FLAG_ZEROPAD_ON_FAIL);
-        return VMM_STATUS_SUCCESS;
-    }
     // read files in process directories:
     if(!_wcsnicmp(wcsFileName, L"\\name", 5) || !_wcsnicmp(wcsFileName, L"\\pid", 4)) {
         if(!VmmVfs_UtilVmmGetPidDirFile(wcsFileName, &path)) { return nt; }
@@ -192,9 +197,13 @@ NTSTATUS VmmVfs_Read(LPCWSTR wcsFileName, _Out_ LPVOID pb, _In_ DWORD cb, _Out_ 
         Ob_DECREF(pObProcess);
         return nt;
     }
+    // read '\\memory.pmem'/'\\memory.dmp' - physical memory file:
+    if(!_wcsnicmp(wcsFileName, L"\\memory.", 8)) {
+        return MVmmVfsDump_Read(wcsFileName, pb, cb, pcbRead, cbOffset);
+    }
     // list files in any non-process modules directories
-    Util_PathSplit2_WCHAR((LPWSTR)(wcsFileName + 1), _szBuf, &szModule, &szModulePath);
-    return PluginManager_Read(NULL, szModule, szModulePath, pb, cb, pcbRead, cbOffset);
+    wszModulePath = Util_PathSplit2_ExWCHAR((LPWSTR)(wcsFileName + 1), wszModule, _countof(wszModule));
+    return PluginManager_Read(NULL, wszModule, wszModulePath, pb, cb, pcbRead, cbOffset);
 }
 
 // ----------------------------------------------------------------------------
@@ -206,12 +215,12 @@ NTSTATUS VmmVfsWriteFileProcess(_In_ PVMM_PROCESS pProcess, _In_ PVMMVFS_PATH pP
     BOOL fFound, result;
     // read only files - report zero bytes written
     fFound =
-        !_stricmp(pPath->szPath1, "dtb") ||
-        !_stricmp(pPath->szPath1, "map") ||
-        !_stricmp(pPath->szPath1, "name") ||
-        !_stricmp(pPath->szPath1, "pid") ||
-        !_stricmp(pPath->szPath1, "ppid") ||
-        !_stricmp(pPath->szPath1, "state");
+        !_wcsicmp(pPath->wszPath1, L"dtb") ||
+        !_wcsicmp(pPath->wszPath1, L"map") ||
+        !_wcsicmp(pPath->wszPath1, L"name") ||
+        !_wcsicmp(pPath->wszPath1, L"pid") ||
+        !_wcsicmp(pPath->wszPath1, L"ppid") ||
+        !_wcsicmp(pPath->wszPath1, L"state");
     if(fFound) {
         *pcbWrite = 0;
         return VMM_STATUS_SUCCESS;
@@ -219,102 +228,99 @@ NTSTATUS VmmVfsWriteFileProcess(_In_ PVMM_PROCESS pProcess, _In_ PVMMVFS_PATH pP
     // windows specific writes below:
     if((ctxVmm->tpSystem == VMM_SYSTEM_WINDOWS_X64) || (ctxVmm->tpSystem == VMM_SYSTEM_WINDOWS_X86)) {
         fFound =
-            !_stricmp(pPath->szPath1, "name-long") ||
-            !_stricmp(pPath->szPath1, "win-cmdline") ||
-            !_stricmp(pPath->szPath1, "win-entry") ||
-            !_stricmp(pPath->szPath1, "win-eprocess") ||
-            !_stricmp(pPath->szPath1, "win-kpath") ||
-            !_stricmp(pPath->szPath1, "win-modules") ||
-            !_stricmp(pPath->szPath1, "win-peb");
+            !_wcsicmp(pPath->wszPath1, L"name-long") ||
+            !_wcsicmp(pPath->wszPath1, L"win-cmdline") ||
+            !_wcsicmp(pPath->wszPath1, L"win-entry") ||
+            !_wcsicmp(pPath->wszPath1, L"win-eprocess") ||
+            !_wcsicmp(pPath->wszPath1, L"win-kpath") ||
+            !_wcsicmp(pPath->wszPath1, L"win-modules") ||
+            !_wcsicmp(pPath->wszPath1, L"win-peb");
         if(fFound) {
             *pcbWrite = 0;
             return VMM_STATUS_SUCCESS;
         }
     }
     // write memory to "vmem" file
-    if(!_stricmp(pPath->szPath1, "vmem")) {
+    if(!_wcsicmp(pPath->wszPath1, L"vmem")) {
         result = VmmWrite(pProcess, cbOffset, pb, cb);
         *pcbWrite = cb;
         return VMM_STATUS_SUCCESS;
     }
     // no hit - call down the loadable modules chain for potential hits
-    return PluginManager_Write(pProcess, pPath->szPath1, pPath->szPath2, pb, cb, pcbWrite, cbOffset);
+    return PluginManager_Write(pProcess, pPath->wszPath1, pPath->wszPath2, pb, cb, pcbWrite, cbOffset);
 }
 
-NTSTATUS VmmVfs_Write(LPCWSTR wcsFileName, _In_ LPVOID pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset)
+NTSTATUS VmmVfs_Write(_In_ LPCWSTR wcsFileName, _In_reads_(cb) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset)
 {
     NTSTATUS nt = VMM_STATUS_FILE_INVALID;
-    BOOL result;
     VMMVFS_PATH path;
-    CHAR _szBuf[MAX_PATH];
     PVMM_PROCESS pObProcess;
-    LPSTR szModule, szModulePath;
+    WCHAR wszModule[32];
+    LPWSTR wszModulePath;
     if(!ctxVmm) { return nt; }
-    // read '\\pmem' - physical memory file:
-    if(!_wcsicmp(wcsFileName, L"\\pmem")) {
-        result = VmmWrite(NULL, cbOffset, pb, cb);
-        *pcbWrite = cb;
-        return result ? VMM_STATUS_SUCCESS : VMM_STATUS_FILE_SYSTEM_LIMITATION;
-    }
     // read files in process directories:
     if(!_wcsnicmp(wcsFileName, L"\\name", 5) || !_wcsnicmp(wcsFileName, L"\\pid", 4)) {
-        if(!VmmVfs_UtilVmmGetPidDirFile(wcsFileName, &path) || !path.szPath1) { return nt; }
+        if(!VmmVfs_UtilVmmGetPidDirFile(wcsFileName, &path) || !path.wszPath1) { return nt; }
         pObProcess = VmmProcessGet(path.dwPID);
         if(!pObProcess) { return VMM_STATUS_FILE_INVALID; }
         nt = VmmVfsWriteFileProcess(pObProcess, &path, pb, cb, pcbWrite, cbOffset);
         return nt;
     }
+    // write '\\memory.pmem'/'\\memory.dmp' - physical memory file:
+    if(!_wcsnicmp(wcsFileName, L"\\memory.", 8)) {
+        return MVmmVfsDump_Write(wcsFileName, pb, cb, pcbWrite, cbOffset);
+    }
     // list files in any non-process modules directories
-    Util_PathSplit2_WCHAR((LPWSTR)(wcsFileName + 1), _szBuf, &szModule, &szModulePath);
-    return PluginManager_Write(NULL, szModule, szModulePath, pb, cb, pcbWrite, cbOffset);
+    wszModulePath = Util_PathSplit2_ExWCHAR((LPWSTR)(wcsFileName + 1), wszModule, _countof(wszModule));
+    return PluginManager_Write(NULL, wszModule, wszModulePath, pb, cb, pcbWrite, cbOffset);
 }
 
 // ----------------------------------------------------------------------------
 // FUNCTIONALITY RELATED TO: LIST
 // ----------------------------------------------------------------------------
 
-VOID VmmVfsListFiles_OsSpecific(_In_ PVMM_PROCESS pProcess, _Inout_ PHANDLE pFileList)
+VOID VmmVfsListFiles_OsSpecific(_In_ PVMM_PROCESS pProcess, _In_ PVMMDLL_VFS_FILELIST_EXINFO pExInfo, _Inout_ PHANDLE pFileList)
 {
     PVMMOB_MODULEMAP pObModuleMap;
     // WINDOWS - 32 & 64-bit
     if((ctxVmm->tpSystem == VMM_SYSTEM_WINDOWS_X64) || (ctxVmm->tpSystem == VMM_SYSTEM_WINDOWS_X86)) {
-        VMMDLL_VfsList_AddFile(pFileList, "name-long", pProcess->pObProcessPersistent->cchNameLong);
-        VMMDLL_VfsList_AddFile(pFileList, "win-path", pProcess->pObProcessPersistent->cchPathKernel);
+        VMMDLL_VfsList_AddFileEx(pFileList, "name-long", NULL, pProcess->pObProcessPersistent->cchNameLong, pExInfo);
+        VMMDLL_VfsList_AddFileEx(pFileList, "win-path", NULL, pProcess->pObProcessPersistent->cchPathKernel, pExInfo);
         if(pProcess->pObProcessPersistent->UserProcessParams.cchCommandLine) {
-            VMMDLL_VfsList_AddFile(pFileList, "win-cmdline", pProcess->pObProcessPersistent->UserProcessParams.cchCommandLine);
+            VMMDLL_VfsList_AddFileEx(pFileList, "win-cmdline", NULL, pProcess->pObProcessPersistent->UserProcessParams.cchCommandLine, pExInfo);
         }
         // modules
         if(VmmProc_ModuleMapGet(pProcess, &pObModuleMap)) {
             if(pObModuleMap->cbDisplay) {
-                VMMDLL_VfsList_AddFile(pFileList, "win-modules", pObModuleMap->cbDisplay);
+                VMMDLL_VfsList_AddFileEx(pFileList, "win-modules", NULL, pObModuleMap->cbDisplay, pExInfo);
             }
             Ob_DECREF(pObModuleMap);
         }
     }
     // WINDOWS - 64-bit specific
     if(ctxVmm->tpSystem == VMM_SYSTEM_WINDOWS_X64) {
-        VMMDLL_VfsList_AddFile(pFileList, "win-eprocess", 16);
+        VMMDLL_VfsList_AddFileEx(pFileList, "win-eprocess", NULL, 16, pExInfo);
         if(pProcess->win.vaENTRY) {
-            VMMDLL_VfsList_AddFile(pFileList, "win-entry", 16);
+            VMMDLL_VfsList_AddFileEx(pFileList, "win-entry", NULL, 16, pExInfo);
         }
         // 64-bit PEB and modules
         if(pProcess->win.vaPEB) {
-            VMMDLL_VfsList_AddFile(pFileList, "win-peb", 16);
+            VMMDLL_VfsList_AddFileEx(pFileList, "win-peb", NULL, 16, pExInfo);
         }
         // 32-bit PEB
         if(pProcess->win.vaPEB32) {
-            VMMDLL_VfsList_AddFile(pFileList, "win-peb32", 8);
+            VMMDLL_VfsList_AddFileEx(pFileList, "win-peb32", NULL, 8, pExInfo);
         }
     }
     // WINDOWS 32-bit specific
     if(ctxVmm->tpSystem == VMM_SYSTEM_WINDOWS_X86) {
-        VMMDLL_VfsList_AddFile(pFileList, "win-eprocess", 8);
+        VMMDLL_VfsList_AddFileEx(pFileList, "win-eprocess", NULL, 8, pExInfo);
         if(pProcess->win.vaENTRY) {
-            VMMDLL_VfsList_AddFile(pFileList, "win-entry", 8);
+            VMMDLL_VfsList_AddFileEx(pFileList, "win-entry", NULL, 8, pExInfo);
         }
         // PEB
         if(pProcess->win.vaPEB) {
-            VMMDLL_VfsList_AddFile(pFileList, "win-peb", 8);
+            VMMDLL_VfsList_AddFileEx(pFileList, "win-peb", NULL, 8, pExInfo);
         }
     }
 }
@@ -323,6 +329,7 @@ _Success_(return)
 BOOL VmmVfsListFilesProcessRoot(_In_ PVMMVFS_PATH pPath, _Inout_ PHANDLE pFileList)
 {
     PVMM_PROCESS pObProcess = NULL;
+    VMMDLL_VFS_FILELIST_EXINFO ExInfo = { 0 };
     CHAR szBufferFileName[MAX_PATH];
     while((pObProcess = VmmProcessGetNext(pObProcess, 0))) {
         if(pPath->fNamePID) {
@@ -334,7 +341,8 @@ BOOL VmmVfsListFilesProcessRoot(_In_ PVMMVFS_PATH pPath, _Inout_ PHANDLE pFileLi
         } else {
             sprintf_s(szBufferFileName, MAX_PATH - 1, "%i", pObProcess->dwPID);
         }
-        VMMDLL_VfsList_AddDirectory(pFileList, szBufferFileName);
+        VmmVfs_UtilTimeStampFile(pObProcess, &ExInfo);
+        VMMDLL_VfsList_AddDirectoryEx(pFileList, szBufferFileName, NULL, &ExInfo);
     }
     return TRUE;
 }
@@ -343,30 +351,32 @@ _Success_(return)
 BOOL VmmVfsListFilesProcess(_In_ PVMM_PROCESS pProcess, _In_ PVMMVFS_PATH pPath, _Inout_ PHANDLE pFileList)
 {
     PVMMOB_MEMMAP pObMemMap = NULL;
+    VMMDLL_VFS_FILELIST_EXINFO ExInfo = { 0 };
+    VmmVfs_UtilTimeStampFile(pProcess, &ExInfo);
     // populate process directory - list standard files and subdirectories
-    if(!pPath->szPath1) {
+    if(!pPath->wszPath1) {
         VmmMemMapGetEntries(pProcess, 0, &pObMemMap);
-        VMMDLL_VfsList_AddFile(pFileList, "map", (pObMemMap ? pObMemMap->cbDisplay : 0));
+        VMMDLL_VfsList_AddFileEx(pFileList, "map", NULL, (pObMemMap ? pObMemMap->cbDisplay : 0), &ExInfo);
         Ob_DECREF(pObMemMap);
-        VMMDLL_VfsList_AddFile(pFileList, "name", 16);
-        VMMDLL_VfsList_AddFile(pFileList, "pid", 10);
-        VMMDLL_VfsList_AddFile(pFileList, "ppid", 10);
-        VMMDLL_VfsList_AddFile(pFileList, "state", 10);
+        VMMDLL_VfsList_AddFileEx(pFileList, "name", NULL, 16, &ExInfo);
+        VMMDLL_VfsList_AddFileEx(pFileList, "pid", NULL, 10, &ExInfo);
+        VMMDLL_VfsList_AddFileEx(pFileList, "ppid", NULL, 10, &ExInfo);
+        VMMDLL_VfsList_AddFileEx(pFileList, "state", NULL, 10, &ExInfo);
         if(ctxVmm->tpMemoryModel == VMM_MEMORYMODEL_X64) {
-            VMMDLL_VfsList_AddFile(pFileList, "vmem", 0x0001000000000000);
-            VMMDLL_VfsList_AddFile(pFileList, "dtb", 16);
-            if(pProcess->paDTB_UserOpt) { VMMDLL_VfsList_AddFile(pFileList, "dtb-user", 16); }
+            VMMDLL_VfsList_AddFileEx(pFileList, "vmem", NULL, 0x0001000000000000, &ExInfo);
+            VMMDLL_VfsList_AddFileEx(pFileList, "dtb", NULL, 16, &ExInfo);
+            if(pProcess->paDTB_UserOpt) { VMMDLL_VfsList_AddFileEx(pFileList, "dtb-user", NULL, 16, &ExInfo); }
         } else if(ctxVmm->tpMemoryModel == VMM_MEMORYMODEL_X86 || ctxVmm->tpMemoryModel == VMM_MEMORYMODEL_X86PAE) {
-            VMMDLL_VfsList_AddFile(pFileList, "vmem", 0x100000000);
-            VMMDLL_VfsList_AddFile(pFileList, "dtb", 8);
-            if(pProcess->paDTB_UserOpt) { VMMDLL_VfsList_AddFile(pFileList, "dtb-user", 8); }
+            VMMDLL_VfsList_AddFileEx(pFileList, "vmem", NULL, 0x100000000, &ExInfo);
+            VMMDLL_VfsList_AddFileEx(pFileList, "dtb", NULL, 8, &ExInfo);
+            if(pProcess->paDTB_UserOpt) { VMMDLL_VfsList_AddFileEx(pFileList, "dtb-user", NULL, 8, &ExInfo); }
         }
-        VmmVfsListFiles_OsSpecific(pProcess, pFileList);
+        VmmVfsListFiles_OsSpecific(pProcess, &ExInfo, pFileList);
         PluginManager_ListAll(pProcess, pFileList);
         return TRUE;
     }
     // no hit - call down the loadable modules chain for potential hits
-    return PluginManager_List(pProcess, pPath->szPath1, pPath->szPath2, pFileList);
+    return PluginManager_List(pProcess, pPath->wszPath1, pPath->wszPath2, pFileList);
 }
 
 _Success_(return)
@@ -374,8 +384,8 @@ BOOL VmmVfsListFilesRoot(_Inout_ PHANDLE pFileList)
 {
     VMMDLL_VfsList_AddDirectory(pFileList, "name");
     VMMDLL_VfsList_AddDirectory(pFileList, "pid");
-    VMMDLL_VfsList_AddFile(pFileList, "pmem", ctxMain->dev.paMax);
     PluginManager_ListAll(NULL, pFileList);
+    MVmmVfsDump_List(pFileList);
     return TRUE;
 }
 
@@ -383,10 +393,10 @@ BOOL VmmVfs_List(_In_ LPCWSTR wcsPath, _Inout_ PHANDLE pFileList)
 {
     BOOL result = FALSE;
     VMMVFS_PATH path;
-    CHAR _szBuf[MAX_PATH];
     PVMM_PROCESS pObProcess;
-    LPSTR szModule, szModulePath;
-    if(!ctxVmm) { return FALSE; }
+    WCHAR wszModule[32];
+    LPWSTR wszModulePath;
+    if(!ctxVmm || !VMMDLL_VfsList_IsHandleValid(pFileList)) { return FALSE; }
     // list files in root directory
     if(!_wcsicmp(wcsPath, L"\\")) {
         return VmmVfsListFilesRoot(pFileList);
@@ -404,6 +414,6 @@ BOOL VmmVfs_List(_In_ LPCWSTR wcsPath, _Inout_ PHANDLE pFileList)
         return result;
     }
     // list files in any non-process modules directories
-    Util_PathSplit2_WCHAR((LPWSTR)(wcsPath + 1), _szBuf, &szModule, &szModulePath);
-    return PluginManager_List(NULL, szModule, szModulePath, pFileList);
+    wszModulePath = Util_PathSplit2_ExWCHAR((LPWSTR)(wcsPath + 1), wszModule, _countof(wszModule));
+    return PluginManager_List(NULL, wszModule, wszModulePath, pFileList);
 }

@@ -49,6 +49,20 @@ VMMPY_MEMORYMODEL_X64 =                 0x0003
 VMMPY_PLUGIN_EVENT_VERBOSITYCHANGE =    0x01
 VMMPY_PLUGIN_EVENT_TOTALREFRESH =       0x02
 
+# WINDOWS REGISTRY contants below:
+VMMPY_WINREG_NONE =                     0x00
+VMMPY_WINREG_SZ =                       0x01
+VMMPY_WINREG_EXPAND_SZ =                0x02
+VMMPY_WINREG_BINARY =                   0x03
+VMMPY_WINREG_DWORD =                    0x04
+VMMPY_WINREG_DWORD_BIG_ENDIAN =         0x05
+VMMPY_WINREG_LINK =                     0x06
+VMMPY_WINREG_MULTI_SZ =                 0x07
+VMMPY_WINREG_RESOURCE_LIST =            0x08
+VMMPY_WINREG_FULL_RESOURCE_DESCRIPTOR = 0x09
+VMMPY_WINREG_RESOURCE_REQUIREMENTS_LIST = 0x0A
+VMMPY_WINREG_QWORD =                    0x0B
+
 #------------------------------------------------------------------------------
 # VmmPy INITIALIZATION FUNCTIONALITY BELOW:
 #------------------------------------------------------------------------------
@@ -496,6 +510,36 @@ def VmmPy_WinReg_HiveWrite(va_hive, address, bytes_data):
 
 
 
+def VmmPy_WinReg_KeyList(key):
+    """Retrieve sub-keys and associated values with the specified registry key.
+
+    Keyword arguments:
+    key -- str: path of registry key to list. May start with address of CMHIVE
+                in 0xhexadecimal format or HKLM.
+    return -- dict: of list of subkeys and list of values.
+    
+    Example:
+    VmmPy_WinReg_KeyList('HKLM\\HARDWARE') --> {'subkeys': [{'name': 'DEVICEMAP', 'time': 131877368614156304, 'time-str': '2018-11-26 20:14:21 UTC'}, ...], 'values': [...]}
+    """
+    return VMMPYC_WinReg_EnumKey(key)
+
+
+
+def VmmPy_WinReg_ValueRead(keyvalue):
+    """Read a registry value.
+
+    Keyword arguments:
+    keyvalue -- str: path of registry value to read. May start with address of
+                 CMHIVE in 0xhexadecimal format or HKLM.
+    return -- dict: of 'type' (value type as in VMMPY_WINREG_*) and 'data' (value data).
+    
+    Example:
+    VmmPy_WinReg_ValueRead('HKLM\\SYSTEM\\Setup\\SystemPartition') --> {'type': 1, 'data': b'\\\x00D\x00e\x00v\x00i\x00c\x00e\x00\\\x00H...'}
+    """
+    return VMMPYC_WinReg_QueryValue(keyvalue)
+
+
+
 #------------------------------------------------------------------------------
 # VmmPy NETWORK FUNCTIONALITY BELOW:
 #------------------------------------------------------------------------------
@@ -562,6 +606,64 @@ def VmmPy_VfsWrite(path_file, bytes_data, offset = 0):
     """
     path_file = path_file.replace('/', '\\')
     VmmPy_VfsWrite(path_file, bytes_data, offset)
+
+
+
+#------------------------------------------------------------------------------
+# VmmPy Windows Symbol Debugging (.pdb) FUNCTIONALITY BELOW:
+#------------------------------------------------------------------------------
+
+def VmmPy_PdbSymbolAddress(module_name, symbol_name):
+    """Retrieve a symbol address by module and symbol name.
+    NB! Vmm PDB Symbol functionality is limited and there is no guarantee that
+        all modules will be loaded - or that the functionality is available.
+        If multiple modules with the same name exists - the symbol will be
+        searched for in the 1st hit.
+
+    Keyword arguments:
+    module_name -- str: the module name or 'nt' for kernel.
+    symbol_name -- str: the symbol name to lookup.
+    return -- int: address of the located symbol.
+    
+    Example:
+    VmmPy_PdbSymbolAddress('nt', 'PsInitialSystemProcess') --> 0xffff800012345600
+    """
+    return VMMPYC_PdbSymbolAddress(module_name, symbol_name)
+
+def VmmPy_PdbTypeSize(module_name, type_name):
+    """Retrieve a type size by by module and type name.
+    NB! Vmm PDB Symbol functionality is limited and there is no guarantee that
+        all modules will be loaded - or that the functionality is available.
+        If multiple modules with the same name exists - the symbol will be
+        searched for in the 1st hit.
+
+    Keyword arguments:
+    module_name -- str: the module name or 'nt' for kernel.
+    type_name -- str: the type name to lookup.
+    return -- int: size of the type.
+    
+    Example:
+    VmmPy_PdbTypeSize('nt', '_EPROCESS') --> 1568
+    """
+    return VMMPYC_PdbTypeSize(module_name, type_name)
+
+def VmmPy_PdbTypeChildOffset(module_name, type_name, type_child_name):
+    """Retrieve the ofset of a type child (struct member) by by module, type and child name.
+    NB! Vmm PDB Symbol functionality is limited and there is no guarantee that
+        all modules will be loaded - or that the functionality is available.
+        If multiple modules with the same name exists - the symbol will be
+        searched for in the 1st hit.
+
+    Keyword arguments:
+    module_name -- str: the module name or 'nt' for kernel.
+    type_name -- str: the type name to lookup.
+    type_child_name -- str: the type child name (struct member) to lookup.
+    return -- int: offset (relative to type base) of the child type name.
+    
+    Example:
+    VmmPy_PdbTypeChildOffset('nt', '_EPROCESS', 'CreateTime') --> 768
+    """
+    return VMMPYC_PdbTypeChildOffset(module_name, type_name, type_child_name)
 
 
 
