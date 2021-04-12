@@ -1,6 +1,6 @@
 // mm_x64.c : implementation of the x64 / IA32e / long-mode paging / memory model.
 //
-// (c) Ulf Frisk, 2018-2020
+// (c) Ulf Frisk, 2018-2021
 // Author: Ulf Frisk, pcileech@frizk.net
 //
 #include "vmm.h"
@@ -52,7 +52,7 @@ BOOL MmX64_TlbPageTableVerify(_Inout_ PBYTE pb, _In_ QWORD pa, _In_ BOOL fSelfRe
 VOID MmX64_TlbSpider_Stage(_In_ QWORD pa, _In_ BYTE iPML, _In_ BOOL fUserOnly, _In_ POB_SET pPageSet)
 {
     QWORD i, pe;
-    PVMMOB_MEM ptObMEM = NULL;
+    PVMMOB_CACHE_MEM ptObMEM = NULL;
     // 1: retrieve from cache, add to staging if not found
     ptObMEM = VmmCacheGet(VMM_CACHE_TAG_TLB, pa);
     if(!ptObMEM) {
@@ -99,9 +99,9 @@ const QWORD MMX64_PAGETABLEMAP_PML_REGION_MASK_AD[5] = { 0, 0xfff, 0x1fffff, 0x3
 
 VOID MmX64_MapInitialize_Index(_In_ PVMM_PROCESS pProcess, _In_ PVMM_MAP_PTEENTRY pMemMap, _In_ PDWORD pcMemMap, _In_ QWORD vaBase, _In_ BYTE iPML, _In_ QWORD PTEs[512], _In_ BOOL fSupervisorPML, _In_ QWORD paMax)
 {
-    PVMMOB_MEM pObNextPT;
-    QWORD i, pte, va;
-    BOOL fUserOnly, fNextSupervisorPML, fTransition = FALSE;
+    PVMMOB_CACHE_MEM pObNextPT;
+    QWORD i, pte, va, cPages;
+    BOOL fUserOnly, fNextSupervisorPML, fPagedOut = FALSE;
     PVMM_MAP_PTEENTRY pMemMapEntry = pMemMap + *pcMemMap - 1;
     if(!pProcess->fTlbSpiderDone) {
         VmmTlbSpider(pProcess);
@@ -110,12 +110,13 @@ VOID MmX64_MapInitialize_Index(_In_ PVMM_PROCESS pProcess, _In_ PVMM_MAP_PTEENTR
     for(i = 0; i < 512; i++) {
         pte = PTEs[i];
         if(!MMX64_PTE_IS_VALID(pte, iPML)) {
-            if(pte && MMX64_PTE_IS_TRANSITION(pte, iPML)) {
-                pte = MMX64_PTE_IS_TRANSITION(pte, iPML);   // TRANSITION PAGE
-                fTransition = TRUE;
-            } else {
-                continue;                                   // INVALID
-            }
+            if(!pte) { continue; }
+            if(iPML != 1) { continue; }
+            pte = MMX64_PTE_IS_TRANSITION(pte, iPML);
+            pte = 0x8000000000000005 | (pte ? (pte & 0x8000fffffffff000 ) : 0); // GUESS READ-ONLY USER PAGE IF NON TRANSITION
+            fPagedOut = TRUE;
+        } else {
+            fPagedOut = FALSE;
         }
         if((pte & 0x0000fffffffff000) > paMax) { continue; }
         if(fSupervisorPML) { pte = pte & 0xfffffffffffffffb; }
@@ -125,20 +126,24 @@ VOID MmX64_MapInitialize_Index(_In_ PVMM_PROCESS pProcess, _In_ PVMM_MAP_PTEENTR
         if((iPML == 1) || (pte & 0x80) /* PS */) {
             if(iPML == 4) { continue; } // not supported - PML4 cannot map page directly
             if((*pcMemMap == 0) ||
-                ((pMemMapEntry->fPage != (pte & VMM_MEMMAP_PAGE_MASK)) && !fTransition) ||
+                ((pMemMapEntry->fPage != (pte & VMM_MEMMAP_PAGE_MASK)) && !fPagedOut) ||
                 (va != pMemMapEntry->vaBase + (pMemMapEntry->cPages << 12))) {
                 if(*pcMemMap + 1 >= VMM_MEMMAP_ENTRIES_MAX) { return; }
                 pMemMapEntry = pMemMap + *pcMemMap;
                 pMemMapEntry->vaBase = va;
                 pMemMapEntry->fPage = pte & VMM_MEMMAP_PAGE_MASK;
-                pMemMapEntry->cPages = 1ULL << (MMX64_PAGETABLEMAP_PML_REGION_SIZE[iPML] - 12);
+                cPages = 1ULL << (MMX64_PAGETABLEMAP_PML_REGION_SIZE[iPML] - 12);
+                if(fPagedOut) { pMemMapEntry->cSoftware += (DWORD)cPages; }
+                pMemMapEntry->cPages = cPages;
                 *pcMemMap = *pcMemMap + 1;
                 if(*pcMemMap >= VMM_MEMMAP_ENTRIES_MAX - 1) {
                     return;
                 }
                 continue;
             }
-            pMemMapEntry->cPages += 1ULL << (MMX64_PAGETABLEMAP_PML_REGION_SIZE[iPML] - 12);
+            cPages = 1ULL << (MMX64_PAGETABLEMAP_PML_REGION_SIZE[iPML] - 12);
+            if(fPagedOut) { pMemMapEntry->cSoftware += (DWORD)cPages; }
+            pMemMapEntry->cPages += cPages;
             continue;
         }
         // optimization - same PT in multiple consecutive PDe
@@ -156,12 +161,17 @@ VOID MmX64_MapInitialize_Index(_In_ PVMM_PROCESS pProcess, _In_ PVMM_MAP_PTEENTR
     }
 }
 
+VOID MmX64_CallbackCleanup_ObPteMap(PVMMOB_MAP_PTE pOb)
+{
+    LocalFree(pOb->wszMultiText);
+}
+
 _Success_(return)
 BOOL MmX64_PteMapInitialize(_In_ PVMM_PROCESS pProcess)
 {
     QWORD i;
     DWORD cMemMap = 0;
-    PVMMOB_MEM pObPML4;
+    PVMMOB_CACHE_MEM pObPML4;
     PVMM_MAP_PTEENTRY pMemMap = NULL;
     PVMMOB_MAP_PTE pObMap = NULL;
     // already existing?
@@ -186,7 +196,7 @@ BOOL MmX64_PteMapInitialize(_In_ PVMM_PROCESS pProcess)
         Ob_DECREF(pObPML4);
     }
     // allocate VmmOb depending on result
-    pObMap = Ob_Alloc(OB_TAG_MAP_PTE, 0, sizeof(VMMOB_MAP_PTE) + cMemMap * sizeof(VMM_MAP_PTEENTRY), NULL, NULL);
+    pObMap = Ob_Alloc(OB_TAG_MAP_PTE, 0, sizeof(VMMOB_MAP_PTE) + cMemMap * sizeof(VMM_MAP_PTEENTRY), MmX64_CallbackCleanup_ObPteMap, NULL);
     if(!pObMap) {
         pProcess->Map.pObPte = Ob_Alloc(OB_TAG_MAP_PTE, LMEM_ZEROINIT, sizeof(VMMOB_MAP_PTE), NULL, NULL);
         LeaveCriticalSection(&pProcess->LockUpdate);
@@ -208,7 +218,7 @@ _Success_(return)
 BOOL MmX64_Virt2Phys(_In_ QWORD paPT, _In_ BOOL fUserOnly, _In_ BYTE iPML, _In_ QWORD va, _Out_ PQWORD ppa)
 {
     QWORD pte, i, qwMask;
-    PVMMOB_MEM pObPTEs;
+    PVMMOB_CACHE_MEM pObPTEs;
     if(iPML == (BYTE)-1) { iPML = 4; }
     pObPTEs = VmmTlbGetPageTable(paPT & 0x0000fffffffff000, FALSE);
     if(!pObPTEs) { return FALSE; }
@@ -232,10 +242,46 @@ BOOL MmX64_Virt2Phys(_In_ QWORD paPT, _In_ BOOL fUserOnly, _In_ BYTE iPML, _In_ 
     return MmX64_Virt2Phys(pte, fUserOnly, iPML - 1, va, ppa);
 }
 
+VOID MmX64_Virt2PhysVadEx(_In_ QWORD paPT, _Inout_ PVMMOB_MAP_VADEX pVadEx, _In_ BYTE iPML, _Inout_ PDWORD piVadEx)
+{
+    QWORD pa, pte, iPte, iVadEx, qwMask;
+    PVMMOB_CACHE_MEM pObPTEs = NULL;
+    if(iPML == (BYTE)-1) { iPML = 4; }
+    if(!(pObPTEs = VmmTlbGetPageTable(paPT & 0x0000fffffffff000, FALSE))) {
+        *piVadEx = *piVadEx + 1;
+        return;
+    }
+next_entry:
+    iVadEx = *piVadEx;
+    iPte = 0x1ff & (pVadEx->pMap[iVadEx].va >> MMX64_PAGETABLEMAP_PML_REGION_SIZE[iPML]);
+    pte = pObPTEs->pqw[iPte];
+    if(!MMX64_PTE_IS_VALID(pte, iPML)) { goto next_check; } // NOT VALID
+    if(!(pte & 0x04)) { goto next_check; }                  // SUPERVISOR PAGE & USER MODE REQ
+    if(pte & 0x000f000000000000) { goto next_check; }       // RESERVED
+    if((iPML == 1) || (pte & 0x80) /* PS */) {
+        if(iPML == 4) { goto next_check; }                  // NO SUPPORT IN PML4
+        qwMask = 0xffffffffffffffff << MMX64_PAGETABLEMAP_PML_REGION_SIZE[iPML];
+        pa = pte & 0x0000fffffffff000 & qwMask;             // MASK AWAY BITS FOR 4kB/2MB/1GB PAGES
+        qwMask = qwMask ^ 0xffffffffffffffff;
+        pVadEx->pMap[iVadEx].pa = pa | (qwMask & pVadEx->pMap[iVadEx].va);  // FILL LOWER ADDRESS BITS
+        pVadEx->pMap[iVadEx].tp = VMM_PTE_TP_HARDWARE;
+        goto next_check;
+    }    
+    MmX64_Virt2PhysVadEx(pte, pVadEx, iPML - 1, piVadEx);
+    Ob_DECREF(pObPTEs);
+    return;
+next_check:
+    pVadEx->pMap[iVadEx].pte = pte;
+    pVadEx->pMap[iVadEx].iPML = iPML;
+    *piVadEx = *piVadEx + 1;
+    if((iPML == 1) && (iPte < 0x1ff) && (iVadEx + 1 < pVadEx->cMap) && (pVadEx->pMap[iVadEx].va + 0x1000 == pVadEx->pMap[iVadEx + 1].va)) { goto next_entry; }
+    Ob_DECREF(pObPTEs);
+}
+
 VOID MmX64_Virt2PhysGetInformation_DoWork(_Inout_ PVMM_PROCESS pProcess, _Inout_ PVMM_VIRT2PHYS_INFORMATION pVirt2PhysInfo, _In_ BYTE iPML, _In_ QWORD PTEs[512])
 {
     QWORD pte, i, qwMask;
-    PVMMOB_MEM pObNextPT;
+    PVMMOB_CACHE_MEM pObNextPT;
     i = 0x1ff & (pVirt2PhysInfo->va >> MMX64_PAGETABLEMAP_PML_REGION_SIZE[iPML]);
     pte = PTEs[i];
     pVirt2PhysInfo->iPTEs[iPML] = (WORD)i;
@@ -244,7 +290,7 @@ VOID MmX64_Virt2PhysGetInformation_DoWork(_Inout_ PVMM_PROCESS pProcess, _Inout_
     if(pProcess->fUserOnly && !(pte & 0x04)) { return; }    // SUPERVISOR PAGE & USER MODE REQ
     if(pte & 0x000f000000000000) { return; }                // RESERVED
     if((iPML == 1) || (pte & 0x80) /* PS */) {
-        if(iPML == 4) { return; }                          // NO SUPPORT IN PML4
+        if(iPML == 4) { return; }                           // NO SUPPORT IN PML4
         qwMask = 0xffffffffffffffff << MMX64_PAGETABLEMAP_PML_REGION_SIZE[iPML];
         pVirt2PhysInfo->pas[0] = pte & 0x0000fffffffff000 & qwMask;     // MASK AWAY BITS FOR 4kB/2MB/1GB PAGES
         qwMask = qwMask ^ 0xffffffffffffffff;
@@ -261,7 +307,7 @@ VOID MmX64_Virt2PhysGetInformation_DoWork(_Inout_ PVMM_PROCESS pProcess, _Inout_
 VOID MmX64_Virt2PhysGetInformation(_Inout_ PVMM_PROCESS pProcess, _Inout_ PVMM_VIRT2PHYS_INFORMATION pVirt2PhysInfo)
 {
     QWORD va;
-    PVMMOB_MEM pObPML4;
+    PVMMOB_CACHE_MEM pObPML4;
     va = pVirt2PhysInfo->va;
     ZeroMemory(pVirt2PhysInfo, sizeof(VMM_VIRT2PHYS_INFORMATION));
     pVirt2PhysInfo->tpMemoryModel = VMM_MEMORYMODEL_X64;
@@ -277,7 +323,7 @@ VOID MmX64_Phys2VirtGetInformation_Index(_In_ PVMM_PROCESS pProcess, _In_ QWORD 
 {
     BOOL fUserOnly;
     QWORD i, pte, va;
-    PVMMOB_MEM pObNextPT;
+    PVMMOB_CACHE_MEM pObNextPT;
     if(!pProcess->fTlbSpiderDone) {
         VmmTlbSpider(pProcess);
     }
@@ -311,7 +357,7 @@ VOID MmX64_Phys2VirtGetInformation_Index(_In_ PVMM_PROCESS pProcess, _In_ QWORD 
 
 VOID MmX64_Phys2VirtGetInformation(_In_ PVMM_PROCESS pProcess, _Inout_ PVMMOB_PHYS2VIRT_INFORMATION pP2V)
 {
-    PVMMOB_MEM pObPML4;
+    PVMMOB_CACHE_MEM pObPML4;
     if((pP2V->cvaList == VMM_PHYS2VIRT_INFORMATION_MAX_PROCESS_RESULT) || (pP2V->paTarget > ctxMain->dev.paMax)) { return; }
     pObPML4 = VmmTlbGetPageTable(pProcess->paDTB, FALSE);
     if(!pObPML4) { return; }
@@ -333,6 +379,7 @@ VOID MmX64_Initialize()
     }
     ctxVmm->fnMemoryModel.pfnClose = MmX64_Close;
     ctxVmm->fnMemoryModel.pfnVirt2Phys = MmX64_Virt2Phys;
+    ctxVmm->fnMemoryModel.pfnVirt2PhysVadEx = MmX64_Virt2PhysVadEx;
     ctxVmm->fnMemoryModel.pfnVirt2PhysGetInformation = MmX64_Virt2PhysGetInformation;
     ctxVmm->fnMemoryModel.pfnPhys2VirtGetInformation = MmX64_Phys2VirtGetInformation;
     ctxVmm->fnMemoryModel.pfnPteMapInitialize = MmX64_PteMapInitialize;

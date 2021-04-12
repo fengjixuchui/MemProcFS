@@ -50,10 +50,14 @@
     <OutDir>$(SolutionDir)files\</OutDir>
     <IntDir>$(SolutionDir)files\temp\$(ProjectName)\</IntDir>
     <ExecutablePath>$(VC_ExecutablePath_x64);$(WindowsSDK_ExecutablePath);$(VS_ExecutablePath);$(MSBuild_ExecutablePath);$(FxCopDir);$(PATH)</ExecutablePath>
+    <IncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);$(SolutionDir)includes;</IncludePath>
+    <LibraryPath>$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64);$(SolutionDir)includes\lib64;</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <OutDir>$(SolutionDir)files\</OutDir>
     <IntDir>$(SolutionDir)files\temp\$(ProjectName)\</IntDir>
+    <IncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);$(SolutionDir)includes;</IncludePath>
+    <LibraryPath>$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64);$(SolutionDir)includes\lib64;</LibraryPath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -63,6 +67,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;VMM_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <CompileAs>CompileAsC</CompileAs>
+      <AdditionalOptions>/DSQLITE_THREADSAFE=2 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -70,15 +75,14 @@
       <ModuleDefinitionFile>vmmdll.def</ModuleDefinitionFile>
       <ProgramDatabaseFile>$(OutDir)\lib\$(TargetName).pdb</ProgramDatabaseFile>
       <ImportLibrary>$(OutDir)lib\$(TargetName).lib</ImportLibrary>
-      <AdditionalDependencies>$(SolutionDir)\files\leechcore.lib;Crypt32.lib;Shlwapi.lib;Ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>leechcore.lib;bcrypt.lib;crypt32.lib;Shlwapi.lib;Ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>
-copy "$(OutDir)\lib\vmm.lib" "$(OutDir)\vmm.lib" /y</Command>
+      <Command>copy "$(OutDir)\lib\vmm.lib" "$(SolutionDir)includes\lib64" /y
+</Command>
     </PostBuildEvent>
     <PreBuildEvent>
-      <Command>copy $(SolutionDir)\files\leechcore.h $(ProjectDir)\ /y
-copy $(ProjectDir)\vmmdll.h $(SolutionDir)\files\ /y</Command>
+      <Command>copy $(ProjectDir)\vmmdll.h $(SolutionDir)\includes\ /y</Command>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -92,6 +96,7 @@ copy $(ProjectDir)\vmmdll.h $(SolutionDir)\files\ /y</Command>
       <PreprocessorDefinitions>NDEBUG;VMM_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <CompileAs>CompileAsC</CompileAs>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <AdditionalOptions>/DSQLITE_THREADSAFE=2 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -102,26 +107,29 @@ copy $(ProjectDir)\vmmdll.h $(SolutionDir)\files\ /y</Command>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <ProgramDatabaseFile>$(OutDir)\lib\$(TargetName).pdb</ProgramDatabaseFile>
       <ImportLibrary>$(OutDir)lib\$(TargetName).lib</ImportLibrary>
-      <AdditionalDependencies>$(SolutionDir)\files\leechcore.lib;Crypt32.lib;Shlwapi.lib;Ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>leechcore.lib;bcrypt.lib;crypt32.lib;Shlwapi.lib;Ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <CETCompat>true</CETCompat>
     </Link>
     <PostBuildEvent>
-      <Command>
-copy "$(OutDir)\lib\vmm.lib" "$(OutDir)\vmm.lib" /y</Command>
+      <Command>copy "$(OutDir)\lib\vmm.lib" "$(SolutionDir)includes\lib64" /y
+</Command>
     </PostBuildEvent>
     <PreBuildEvent>
-      <Command>copy $(SolutionDir)\files\leechcore.h $(ProjectDir)\ /y
-copy $(ProjectDir)\vmmdll.h $(SolutionDir)\files\ /y</Command>
+      <Command>copy $(ProjectDir)\vmmdll.h $(SolutionDir)\includes\ /y</Command>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="leechcore.h" />
+    <ClInclude Include="..\includes\leechcore.h" />
+    <ClInclude Include="fc.h" />
     <ClInclude Include="mm.h" />
     <ClInclude Include="mm_pfn.h" />
     <ClInclude Include="m_modules.h" />
-    <ClInclude Include="ob.h" />
+    <ClInclude Include="ob\ob.h" />
     <ClInclude Include="pdb.h" />
     <ClInclude Include="pe.h" />
     <ClInclude Include="resource.h" />
+    <ClInclude Include="sqlite\sqlite3.h" />
+    <ClInclude Include="sqlite\sqlite3ext.h" />
     <ClInclude Include="statistics.h" />
     <ClInclude Include="sysquery.h" />
     <ClInclude Include="util.h" />
@@ -129,49 +137,70 @@ copy $(ProjectDir)\vmmdll.h $(SolutionDir)\files\ /y</Command>
     <ClInclude Include="version.h" />
     <ClInclude Include="vmm.h" />
     <ClInclude Include="vmmdll.h" />
+    <ClInclude Include="vmmevil.h" />
+    <ClInclude Include="vmmnet.h" />
     <ClInclude Include="vmmproc.h" />
     <ClInclude Include="vmmwin.h" />
     <ClInclude Include="vmmwindef.h" />
     <ClInclude Include="vmmwininit.h" />
     <ClInclude Include="vmmwinobj.h" />
     <ClInclude Include="vmmwinreg.h" />
-    <ClInclude Include="vmmwintcpip.h" />
+    <ClInclude Include="vmmwinsvc.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="fc.c" />
     <ClCompile Include="mm_pfn.c" />
     <ClCompile Include="mm_vad.c" />
     <ClCompile Include="mm_win.c" />
     <ClCompile Include="mm_x64.c" />
     <ClCompile Include="mm_x86.c" />
     <ClCompile Include="mm_x86pae.c" />
+    <ClCompile Include="m_fc_ntfs.c" />
+    <ClCompile Include="m_fc_proc.c" />
+    <ClCompile Include="m_fc_registry.c" />
+    <ClCompile Include="m_fc_thread.c" />
+    <ClCompile Include="m_fc_timeline.c" />
     <ClCompile Include="m_file_handles_vads.c" />
     <ClCompile Include="m_file_modules.c" />
-    <ClCompile Include="m_handleinfo.c" />
+    <ClCompile Include="m_findevil.c" />
+    <ClCompile Include="m_handle.c" />
     <ClCompile Include="m_memmap.c" />
+    <ClCompile Include="m_minidump.c" />
     <ClCompile Include="m_phys2virt.c" />
-    <ClCompile Include="m_procuser.c" />
+    <ClCompile Include="m_proc_token.c" />
     <ClCompile Include="m_status.c" />
-    <ClCompile Include="m_sysinfo.c" />
-    <ClCompile Include="m_sysinfo_cert.c" />
-    <ClCompile Include="m_sysinfo_mem.c" />
-    <ClCompile Include="m_sysinfo_net.c" />
-    <ClCompile Include="m_sysinfo_proc.c" />
-    <ClCompile Include="m_threadinfo.c" />
+    <ClCompile Include="m_sys.c" />
+    <ClCompile Include="m_sys_cert.c" />
+    <ClCompile Include="m_sys_driver.c" />
+    <ClCompile Include="m_sys_mem.c" />
+    <ClCompile Include="m_sys_net.c" />
+    <ClCompile Include="m_sys_obj.c" />
+    <ClCompile Include="m_sys_proc.c" />
+    <ClCompile Include="m_sys_svc.c" />
+    <ClCompile Include="m_sys_syscall.c" />
+    <ClCompile Include="m_thread.c" />
+    <ClCompile Include="m_vfsfc.c" />
     <ClCompile Include="m_vfsproc.c" />
     <ClCompile Include="m_vfsroot.c" />
     <ClCompile Include="m_winreg.c" />
-    <ClCompile Include="ob_container.c" />
-    <ClCompile Include="ob_core.c" />
-    <ClCompile Include="ob_map.c" />
-    <ClCompile Include="ob_set.c" />
+    <ClCompile Include="ob\ob_cachemap.c" />
+    <ClCompile Include="ob\ob_compressed.c" />
+    <ClCompile Include="ob\ob_container.c" />
+    <ClCompile Include="ob\ob_core.c" />
+    <ClCompile Include="ob\ob_map.c" />
+    <ClCompile Include="ob\ob_set.c" />
+    <ClCompile Include="ob\ob_strmap.c" />
     <ClCompile Include="pdb.c" />
     <ClCompile Include="pe.c" />
+    <ClCompile Include="sqlite\sqlite3.c" />
     <ClCompile Include="statistics.c" />
     <ClCompile Include="sysquery.c" />
     <ClCompile Include="util.c" />
     <ClCompile Include="vmm.c" />
     <ClCompile Include="vmmdll.c" />
     <ClCompile Include="m_ldrmodules.c" />
+    <ClCompile Include="vmmevil.c" />
+    <ClCompile Include="vmmnet.c" />
     <ClCompile Include="vmmproc.c" />
     <ClCompile Include="vmmwin.c" />
     <ClCompile Include="pluginmanager.c" />
@@ -179,7 +208,7 @@ copy $(ProjectDir)\vmmdll.h $(SolutionDir)\files\ /y</Command>
     <ClCompile Include="vmmwininit.c" />
     <ClCompile Include="vmmwinobj.c" />
     <ClCompile Include="vmmwinreg.c" />
-    <ClCompile Include="vmmwintcpip.c" />
+    <ClCompile Include="vmmwinsvc.c" />
   </ItemGroup>
   <ItemGroup>
     <None Include="vmmdll.def" />
@@ -190,4 +219,7 @@ copy $(ProjectDir)\vmmdll.h $(SolutionDir)\files\ /y</Command>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <PropertyGroup>
+    <CAExcludePath>$(ProjectDir)\include;$(CAExcludePath)</CAExcludePath>
+  </PropertyGroup>
 </Project>

@@ -47,10 +47,12 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <OutDir>$(SolutionDir)files\</OutDir>
     <IntDir>$(SolutionDir)files\temp\$(ProjectName)\</IntDir>
+    <IncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);$(SolutionDir)includes;</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <OutDir>$(SolutionDir)files\</OutDir>
     <IntDir>$(SolutionDir)files\temp\$(ProjectName)\</IntDir>
+    <IncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);$(SolutionDir)includes;</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -71,9 +73,8 @@
       <ProgramDatabaseFile>$(OutDir)\lib\$(TargetName).pdb</ProgramDatabaseFile>
     </Link>
     <PreBuildEvent>
-      <Command>copy $(SolutionDir)\files\leechcore.h $(ProjectDir)\ /y
-
-copy $(SolutionDir)\files\vmmdll.h $(ProjectDir)\ /y</Command>
+      <Command>
+      </Command>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -95,28 +96,35 @@ copy $(SolutionDir)\files\vmmdll.h $(ProjectDir)\ /y</Command>
       <OptimizeReferences>true</OptimizeReferences>
       <ProgramDatabaseFile>$(OutDir)\lib\$(TargetName).pdb</ProgramDatabaseFile>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
+      <CETCompat>true</CETCompat>
     </Link>
     <PostBuildEvent>
       <Command>
       </Command>
     </PostBuildEvent>
     <PreBuildEvent>
-      <Command>copy $(SolutionDir)\files\leechcore.h $(ProjectDir)\ /y
-copy $(SolutionDir)\files\vmmdll.h $(ProjectDir)\ /y</Command>
+      <Command>
+      </Command>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="memprocfs.c" />
-    <ClCompile Include="vfs.c" />
+    <ClCompile Include="ob\ob_cachemap.c" />
+    <ClCompile Include="ob\ob_core.c" />
+    <ClCompile Include="ob\ob_map.c" />
+    <ClCompile Include="ob\ob_set.c" />
+    <ClCompile Include="vfsdokan.c" />
+    <ClCompile Include="vfslist.c" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="dokan.h" />
-    <ClInclude Include="fileinfo.h" />
-    <ClInclude Include="leechcore.h" />
-    <ClInclude Include="public.h" />
+    <ClInclude Include="..\includes\dokan.h" />
+    <ClInclude Include="..\includes\fileinfo.h" />
+    <ClInclude Include="..\includes\leechcore.h" />
+    <ClInclude Include="..\includes\public.h" />
+    <ClInclude Include="..\includes\vmmdll.h" />
+    <ClInclude Include="ob\ob.h" />
     <ClInclude Include="version.h" />
     <ClInclude Include="vfs.h" />
-    <ClInclude Include="vmmdll.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="MemProcFS.rc" />

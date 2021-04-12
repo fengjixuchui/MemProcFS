@@ -1,12 +1,12 @@
 // memprocfs.h : implementation of core functionality for the Memory Process File System
 // This is just a thin loader for the virtual memory manager dll which contains the logic.
 //
-// (c) Ulf Frisk, 2018-2020
+// (c) Ulf Frisk, 2018-2021
 // Author: Ulf Frisk, pcileech@frizk.net
 //
 #include <Windows.h>
 #include <stdio.h>
-#include "vmmdll.h"
+#include <vmmdll.h>
 #include "vfs.h"
 
 CHAR g_VfsMountPoint = 'M';
@@ -45,7 +45,8 @@ VOID MemProcFsCtrlHandler_TryShutdownThread(PVOID pv)
     HMODULE hModuleVmm;
     BOOL(*VMMDLL_Close)();
     __try {
-        VfsClose(g_VfsMountPoint);
+        VfsDokan_Close(g_VfsMountPoint);
+        VfsList_Close();
     } __except(EXCEPTION_EXECUTE_HANDLER) { ; }
     __try {
         hModuleVmm = GetModuleHandleA("vmm.dll");
@@ -71,7 +72,7 @@ BOOL WINAPI MemProcFsCtrlHandler(DWORD fdwCtrlType)
     if (fdwCtrlType == CTRL_C_EVENT) {
         printf("CTRL+C detected - shutting down ...\n");
         hThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)MemProcFsCtrlHandler_TryShutdownThread, NULL, 0, NULL);
-		if(hThread) { WaitForSingleObject(hThread, 500); }
+		if(hThread) { WaitForSingleObject(hThread, INFINITE); }
         TerminateProcess(GetCurrentProcess(), 1);
         Sleep(1000);
         ExitProcess(1);
@@ -97,38 +98,51 @@ int main(_In_ int argc, _In_ char* argv[])
     BOOL result;
     HMODULE hVMM;
     VMMDLL_FUNCTIONS VmmDll;
+    int i;
+    LPSTR *szArgs = NULL;
     LoadLibraryA("leechcore.dll");
-    hVMM = LoadLibraryExA("vmm.dll", NULL, LOAD_LIBRARY_SEARCH_APPLICATION_DIR);
+    hVMM = LoadLibraryA("vmm.dll");
     if(!hVMM) {
         printf("MemProcFS: Error loading vmm.dll - ensure vmm.dll resides in the memprocfs.exe application directory!\n");
         return 1;
     }
     VmmDll.Initialize = (BOOL(*)(DWORD, LPSTR*))GetProcAddress(hVMM, "VMMDLL_Initialize");
+    VmmDll.InitializePlugins = (BOOL(*)())GetProcAddress(hVMM, "VMMDLL_InitializePlugins");
     VmmDll.ConfigGet = (BOOL(*)(ULONG64, PULONG64))GetProcAddress(hVMM, "VMMDLL_ConfigGet");
     VmmDll.ConfigSet = (BOOL(*)(ULONG64, ULONG64))GetProcAddress(hVMM, "VMMDLL_ConfigSet");
     VmmDll.VfsList = (BOOL(*)(LPCWSTR, PVMMDLL_VFS_FILELIST))GetProcAddress(hVMM, "VMMDLL_VfsList");
     VmmDll.VfsRead = (DWORD(*)(LPCWSTR, LPVOID, DWORD, PDWORD, ULONG64))GetProcAddress(hVMM, "VMMDLL_VfsRead");
     VmmDll.VfsWrite = (DWORD(*)(LPCWSTR, LPVOID, DWORD, PDWORD, ULONG64))GetProcAddress(hVMM, "VMMDLL_VfsWrite");
-    VmmDll.VfsInitializePlugins = (BOOL(*)())GetProcAddress(hVMM, "VMMDLL_VfsInitializePlugins");
-    if(!VmmDll.Initialize || !VmmDll.ConfigGet || !VmmDll.VfsList || !VmmDll.VfsRead || !VmmDll.VfsWrite || !VmmDll.VfsInitializePlugins) {
+    if(!VmmDll.Initialize || !VmmDll.ConfigGet || !VmmDll.VfsList || !VmmDll.VfsRead || !VmmDll.VfsWrite || !VmmDll.InitializePlugins) {
         printf("MemProcFS: Error loading vmm.dll - invalid version of vmm.dll found!\n");
         return 1;
     }
-    argv[0] = "-printf";
-    result = VmmDll.Initialize(argc, argv);
+    if(!(szArgs = LocalAlloc(LMEM_ZEROINIT, (argc + 1ULL) * sizeof(LPSTR)))) {
+        printf("MemProcFS: Out of memory!\n");
+        return 1;
+    }
+    for(i = 1; i < argc; i++) {
+        szArgs[i] = argv[i];
+    }
+    szArgs[0] = "-printf";
+    if(argc > 2) {
+        szArgs[argc++] = "-userinteract";
+    }
+    result = VmmDll.Initialize(argc, szArgs);
     if(!result) {
         // any error message will already be shown by the InitializeReserved function.
         return 1;
     }
     VmmDll.ConfigSet(VMMDLL_OPT_CONFIG_STATISTICS_FUNCTIONCALL, 1);
-    result = VmmDll.VfsInitializePlugins();
+    result = VmmDll.InitializePlugins();
     if(!result) {
         printf("MemProcFS: Error file system plugins in vmm.dll!\n");
         return 1;
     }
+    VfsList_Initialize(hVMM, 500, 128);
     SetConsoleCtrlHandler(MemProcFsCtrlHandler, TRUE);
     g_VfsMountPoint = GetMountPoint(argc, argv);
-    VfsInitializeAndMount(g_VfsMountPoint, &VmmDll);
+    VfsDokan_InitializeAndMount(g_VfsMountPoint, &VmmDll);
     CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)MemProcFsCtrlHandler_TryShutdownThread, NULL, 0, NULL);
     Sleep(250);
     TerminateProcess(GetCurrentProcess(), 1);

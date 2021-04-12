@@ -1,10 +1,11 @@
 // statistics.c : implementation of statistics related functionality.
 //
-// (c) Ulf Frisk, 2016-2020
+// (c) Ulf Frisk, 2016-2021
 // Author: Ulf Frisk, pcileech@frizk.net
 //
 #include "statistics.h"
 #include "vmm.h"
+#include "util.h"
 
 // ----------------------------------------------------------------------------
 // PAGE READ STATISTICAL FUNCTIONALITY BELOW:
@@ -179,59 +180,6 @@ VOID PageStatUpdate(_In_opt_ PPAGE_STATISTICS pPageStat, _In_ QWORD qwAddr, _In_
 // FUNCTION CALL STATISTICAL FUNCTIONALITY BELOW:
 // ----------------------------------------------------------------------------
 
-const LPSTR NAMES_VMM_STATISTICS_CALL[] = {
-    "INITIALIZE",
-    "PluginManager_List",
-    "PluginManager_Read",
-    "PluginManager_Write",
-    "PluginManager_Notify",
-    "VMMDLL_VfsList",
-    "VMMDLL_VfsRead",
-    "VMMDLL_VfsWrite",
-    "VMMDLL_VfsInitializePlugins",
-    "VMMDLL_MemReadEx",
-    "VMMDLL_MemReadScatter",
-    "VMMDLL_MemWrite",
-    "VMMDLL_MemVirt2Phys",
-    "VMMDLL_MemPrefetchPages",
-    "VMMDLL_PidList",
-    "VMMDLL_PidGetFromName",
-    "VMMDLL_ProcessGetInformation",
-    "VMMDLL_ProcessGetInformationString",
-    "VMMDLL_ProcessMap_GetPte",
-    "VMMDLL_ProcessMap_GetVad",
-    "VMMDLL_ProcessMap_GetModule",
-    "VMMDLL_ProcessMap_GetModuleFromName",
-    "VMMDLL_ProcessMap_GetHeap",
-    "VMMDLL_ProcessMap_GetThread",
-    "VMMDLL_ProcessMap_GetHandle",
-    "VMMDLL_Map_GetPhysMem",
-    "VMMDLL_Map_GetUsers",
-    "VMMDLL_Map_GetPfn",
-    "VMMDLL_ProcessGetDirectories",
-    "VMMDLL_ProcessGetSections",
-    "VMMDLL_ProcessGetEAT",
-    "VMMDLL_ProcessGetIAT",
-    "VMMDLL_ProcessGetProcAddress",
-    "VMMDLL_ProcessGetModuleBase",
-    "VMMDLL_WinGetThunkEAT",
-    "VMMDLL_WinGetThunkIAT",
-    "VMMDLL_WinMemCompression_DecompressPage",
-    "VMMDLL_WinRegHive_List",
-    "VMMDLL_WinRegHive_ReadEx",
-    "VMMDLL_WinRegHive_Write",
-    "VMMDLL_WinReg_EnumKeyExW",
-    "VMMDLL_WinReg_EnumValueW",
-    "VMMDLL_WinReg_QueryValueExW",
-    "VMMDLL_WinNet_Get",
-    "VMMDLL_Refresh",
-    "VMMDLL_UtilFillHexAscii",
-    "VMMDLL_PdbSymbolAddress",
-    "VMMDLL_PdbTypeSize",
-    "VMMDLL_PdbTypeChildOffset",
-    "VMM_PagedCompressedMemory",
-};
-
 typedef struct tdCALLSTAT {
     QWORD c;
     QWORD tm;
@@ -276,78 +224,73 @@ QWORD Statistics_CallEnd(_In_ DWORD fId, QWORD tmCallStart)
     return tmNow - tmCallStart;
 }
 
-VOID Statistics_CallToString(_In_opt_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcb)
+#define STATISTICS_CALL_LINELENGTH      79
+#define STATISTICS_CALL_BUFFERSIZE      (STATISTICS_CALL_LINELENGTH * (4 + STATISTICS_ID_MAX + 1 + LC_STATISTICS_ID_MAX + 1) + 1)
+
+/*
+* Retrieve call statistics as a string buffer and size. If psz is not supplied
+* only retrieve size.
+* CALLER LocalFree: psz
+* -- psz
+* -- pcsz
+* -- return
+*/
+_Success_(return)
+BOOL Statistics_CallToString(_Out_opt_ LPSTR *psz, _Out_ PDWORD pcsz)
 {
+    LPSTR sz;
     BOOL result;
-    QWORD qwFreq, uS;
-    DWORD i, o = 0;
+    QWORD i, o = 0, qwFreq, qwCallCount, qwCallTimeAvg_uS, qwCallTimeTotal_uS;
     PCALLSTAT pStat;
-    LEECHCORE_STATISTICS LeechCoreStatistics = { 0 };
-    DWORD cbLeechCoreStatistics = sizeof(LEECHCORE_STATISTICS);
-    if(!pb) { 
-        *pcb = 79 * (STATISTICS_ID_MAX + LEECHCORE_STATISTICS_ID_MAX + 6);
-        return;
-    }
+    PLC_STATISTICS pLcStatistics = NULL;
+    *pcsz = STATISTICS_CALL_BUFFERSIZE - 1;
+    if(!psz) { return TRUE; }
+    if(!(*psz = sz = LocalAlloc(0, STATISTICS_CALL_BUFFERSIZE))) { return FALSE; }
     QueryPerformanceFrequency((PLARGE_INTEGER)&qwFreq);
-    o += snprintf(
-        pb + o,
-        cb - o,
-        "FUNCTION CALL STATISTICS:                                                     \n" \
-        "VALUES IN DECIMAL, TIME IN MICROSECONDS uS, STATISTICS = %s             \n" \
-        "FUNCTION CALL NAME                           CALLS  TIME AVG        TIME TOTAL\n" \
-        "==============================================================================\n",
-        ctxMain->pvStatistics ? "ENABLED " : "DISABLED"
-        );
-    // statistics
+    // header
+    o += Util_snwprintf_u8ln(sz + o, STATISTICS_CALL_LINELENGTH, L"FUNCTION CALL STATISTICS:");
+    o += Util_snwprintf_u8ln(sz + o, STATISTICS_CALL_LINELENGTH, L"VALUES IN DECIMAL, TIME IN MICROSECONDS uS, STATISTICS = %s", ctxMain->pvStatistics ? L"ENABLED " : L"DISABLED");
+    o += Util_snwprintf_u8ln(sz + o, STATISTICS_CALL_LINELENGTH, L"FUNCTION CALL NAME                           CALLS  TIME AVG        TIME TOTAL");
+    o += Util_snwprintf_u8ln(sz + o, STATISTICS_CALL_LINELENGTH, L"==============================================================================");
+    // vmm statistics
     for(i = 0; i <= STATISTICS_ID_MAX; i++) {
-        if(ctxMain->pvStatistics) {
-            pStat = ((PCALLSTAT)ctxMain->pvStatistics) + i;
-            if(pStat->c) {
-                uS = (pStat->tm * 1000000ULL) / qwFreq;
-                o += snprintf(
-                    pb + o,
-                    cb - o,
-                    "%-40.40s  %8i  %8i  %16lli\n",
-                    NAMES_VMM_STATISTICS_CALL[i],
-                    (DWORD)pStat->c,
-                    (DWORD)(uS / pStat->c),
-                    uS
-                );
-                continue;
-            }
+        qwCallCount = qwCallTimeAvg_uS = qwCallTimeTotal_uS = 0;
+        if((pStat = ((PCALLSTAT)ctxMain->pvStatistics) + i) && pStat->c) {
+            qwCallCount = pStat->c;
+            qwCallTimeTotal_uS = (pStat->tm * 1000000ULL) / qwFreq;
+            qwCallTimeAvg_uS = (qwCallTimeTotal_uS / qwCallCount);
         }
-        o += snprintf(
-            pb + o,
-            cb - o,
-            "%-40.40s  %8i  %8i  %16lli\n",
-            NAMES_VMM_STATISTICS_CALL[i],
-            0, 0, 0ULL);
+        o += Util_snwprintf_u8ln(
+            sz + o,
+            STATISTICS_CALL_LINELENGTH,
+            L"%-40.40S %9lli %9lli %17lli",
+            STATISTICS_ID_STR[i],
+            qwCallCount,
+            qwCallTimeAvg_uS,
+            qwCallTimeTotal_uS
+        );
     }
     // leechcore statistics
-    result = LeechCore_CommandData(LEECHCORE_COMMANDDATA_STATISTICS_GET, NULL, 0, (PBYTE)&LeechCoreStatistics, cbLeechCoreStatistics, &cbLeechCoreStatistics);
-    if(result && (LeechCoreStatistics.magic == LEECHCORE_STATISTICS_MAGIC) && (LeechCoreStatistics.version == LEECHCORE_STATISTICS_VERSION) && LeechCoreStatistics.qwFreq) {
-        for(i = 0; i <= LEECHCORE_STATISTICS_ID_MAX; i++) {
-            if(LeechCoreStatistics.Call[i].c) {
-                uS = (LeechCoreStatistics.Call[i].tm * 1000000ULL) / LeechCoreStatistics.qwFreq;
-                o += snprintf(
-                    pb + o,
-                    cb - o,
-                    "%-40.40s  %8i  %8i  %16lli\n",
-                    LEECHCORE_STATISTICS_NAME[i],
-                    (DWORD)LeechCoreStatistics.Call[i].c,
-                    (DWORD)(uS / LeechCoreStatistics.Call[i].c),
-                    uS
-                );
-            } else {
-                o += snprintf(
-                    pb + o,
-                    cb - o,
-                    "%-40.40s  %8i  %8i  %16lli\n",
-                    LEECHCORE_STATISTICS_NAME[i],
-                    0, 0, 0ULL);
+    result = LcCommand(ctxMain->hLC, LC_CMD_STATISTICS_GET, 0, NULL, &(PBYTE)pLcStatistics, NULL);
+    if(result && (pLcStatistics->dwVersion == LC_STATISTICS_VERSION) && pLcStatistics->qwFreq) {
+        for(i = 0; i <= LC_STATISTICS_ID_MAX; i++) {
+            qwCallCount = qwCallTimeAvg_uS = qwCallTimeTotal_uS = 0;
+            if(pLcStatistics->Call[i].c) {
+                qwCallCount = pLcStatistics->Call[i].c;
+                qwCallTimeTotal_uS = (pLcStatistics->Call[i].tm * 1000000ULL) / qwFreq;
+                qwCallTimeAvg_uS = (qwCallTimeTotal_uS / qwCallCount);
             }
+           o += Util_snwprintf_u8ln(
+                sz + o,
+                STATISTICS_CALL_LINELENGTH,
+                L"%-40.40S %9lli %9lli %17lli",
+                LC_STATISTICS_NAME[i],
+                qwCallCount,
+                qwCallTimeAvg_uS,
+                qwCallTimeTotal_uS
+            );
         }
     }
-    pb[o - 1] = '\n';
-    *pcb = o;
+    LocalFree(pLcStatistics);
+    return TRUE;
 }

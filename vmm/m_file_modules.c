@@ -1,6 +1,6 @@
 // m_files_modules.c : implementation of the 'files/modules' built-in module.
 //
-// (c) Ulf Frisk, 2019-2020
+// (c) Ulf Frisk, 2019-2021
 // Author: Ulf Frisk, pcileech@frizk.net
 //
 #include "pluginmanager.h"
@@ -108,15 +108,14 @@ BOOL M_FileModules_List(_In_ PVMMDLL_PLUGIN_CONTEXT ctx, _Inout_ PHANDLE pFileLi
 * -- cbOffset
 * -- return
 */
-NTSTATUS M_FileModules_Read(_In_ PVMMDLL_PLUGIN_CONTEXT ctx, _Out_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
+NTSTATUS M_FileModules_Read(_In_ PVMMDLL_PLUGIN_CONTEXT ctx, _Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
 {
     BOOL f;
     PVMM_MAP_MODULEENTRY pModule = NULL;
     PVMMOB_MAP_MODULE pObModuleMap = NULL;
     *pcbRead = 0;
     f = (cbOffset <= 0x02000000) &&
-        VmmMap_GetModule((PVMM_PROCESS)ctx->pProcess, &pObModuleMap) &&
-        (pModule = VmmMap_GetModuleEntry(pObModuleMap, ctx->wszPath)) &&
+        VmmMap_GetModuleEntryEx((PVMM_PROCESS)ctx->pProcess, 0, ctx->wszPath, &pObModuleMap, &pModule) &&
         PE_FileRaw_Read(ctx->pProcess, pModule->vaBase, pb, cb, pcbRead, (DWORD)cbOffset);
     Ob_DECREF_NULL(&pObModuleMap);
     return f ? VMMDLL_STATUS_SUCCESS : VMMDLL_STATUS_FILE_INVALID;
@@ -137,15 +136,14 @@ NTSTATUS M_FileModules_Read(_In_ PVMMDLL_PLUGIN_CONTEXT ctx, _Out_ PBYTE pb, _In
 * -- cbOffset
 * -- return
 */
-NTSTATUS M_FileModules_Write(_In_ PVMMDLL_PLUGIN_CONTEXT ctx, _In_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset)
+NTSTATUS M_FileModules_Write(_In_ PVMMDLL_PLUGIN_CONTEXT ctx, _In_reads_(cb) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset)
 {
     BOOL f;
     PVMM_MAP_MODULEENTRY pModule = NULL;
     PVMMOB_MAP_MODULE pObModuleMap = NULL;
     *pcbWrite = 0;
     f = (cbOffset <= 0x02000000) &&
-        VmmMap_GetModule((PVMM_PROCESS)ctx->pProcess, &pObModuleMap) &&
-        (pModule = VmmMap_GetModuleEntry(pObModuleMap, ctx->wszPath)) &&
+        VmmMap_GetModuleEntryEx((PVMM_PROCESS)ctx->pProcess, 0, ctx->wszPath, &pObModuleMap, &pModule) &&
         PE_FileRaw_Write(ctx->pProcess, pModule->vaBase, pb, cb, pcbWrite, (DWORD)cbOffset);
     Ob_DECREF_NULL(&pObModuleMap);
     return f ? VMMDLL_STATUS_SUCCESS : VMMDLL_STATUS_FILE_INVALID;
@@ -167,8 +165,6 @@ VOID M_FileModules_Initialize(_Inout_ PVMMDLL_PLUGIN_REGINFO pRI)
     pRI->reg_info.fProcessModule = TRUE;                                // module shows in process directory
     pRI->reg_fn.pfnList = M_FileModules_List;                           // List function supported
     pRI->reg_fn.pfnRead = M_FileModules_Read;                           // Read function supported
-    if(ctxMain->dev.fWritable) {
-        pRI->reg_fn.pfnWrite = M_FileModules_Write;                     // Write function supported
-    }
+    pRI->reg_fn.pfnWrite = M_FileModules_Write;                         // Write function supported
     pRI->pfnPluginManager_Register(pRI);
 }

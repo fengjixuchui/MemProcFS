@@ -1,19 +1,21 @@
 The Memory Process File System:
 ===============================
-The Memory Process File System (MemProcFS) is an easy and convenient way of accessing physical memory as files a virtual file system. 
+The Memory Process File System (MemProcFS) is an easy and convenient way of viewing physical memory as files in a virtual file system. 
 
 Easy trivial point and click memory analysis without the need for complicated commandline arguments! Access memory content and artifacts via files in a mounted virtual file system or via a feature rich application library to include in your own projects!
 
 Analyze memory dump files, <b>live memory</b> via DumpIt or WinPMEM, <b>live memory in read-write mode</b> via linked [PCILeech](https://github.com/ufrisk/pcileech/) and [PCILeech-FPGA](https://github.com/ufrisk/pcileech-fpga/) devices!
 
-It's even possible to connect to a remote LeechAgent memory acquisition agent over a secured connection - allowing for remote live memory incident response - even over higher latency low band-width connections!
+It's even possible to connect to a remote LeechAgent memory acquisition agent over a secured connection - allowing for remote live memory incident response - even over higher latency low band-width connections! Peek into Hyper-V Virtual Machines with [LiveCloudKd](https://github.com/ufrisk/LeechCore/wiki/Device_LiveCloudKd)!
 
 Use your favorite tools to analyze memory - use your favorite hex editors, your python and powershell scripts, WinDbg or your favorite disassemblers and debuggers - all will work trivally with MemProcFS by just reading and writing files!
 
 <p align="center"><img src="https://github.com/ufrisk/MemProcFS/wiki/resources/proc_base3.png" height="190"/><img src="https://github.com/ufrisk/MemProcFS/wiki/resources/pciescreamer.jpeg" height="190"/><img src="https://github.com/ufrisk/MemProcFS/wiki/resources/proc_modules.png" height="190"/></p>
 
 
-Include MemProcFS in your Python or C/C++ programming projects! Everything in MemProcFS is exposed via an easy-to-use API for use in your own projects! The Plugin friendly architecture allows users to easily extend MemProcFS with native C .DLL plugins or Python .py plugins - providing additional analysis capabilities!
+Include MemProcFS in your C/C++, C# or Python programming projects! Everything in MemProcFS is exposed via an easy-to-use API for use in your own projects! The Plugin friendly architecture allows users to easily extend MemProcFS with native C .DLL plugins or Python .py plugins - providing additional analysis capabilities!
+
+MemProcFS is available on Python pip. Just type `pip install memprocfs` and you're ready to go! Please see the [Python API documentation](https://github.com/ufrisk/MemProcFS/wiki/API_Python) and the [YouTube demo](https://youtu.be/pLFU1lxBNM0) for examples and usage!
 
 <b>Please check out the [project wiki](https://github.com/ufrisk/MemProcFS/wiki)</b> for more in-depth detailed information about the file system itself, its API and its plugin modules!
 
@@ -27,13 +29,13 @@ No matter if you have no prior knowledge of memory analysis or are an advanced u
 
 <p align="center"><img src="https://github.com/ufrisk/MemProcFS/wiki/resources/proc_procstruct.png" height="225"/><img src="https://github.com/ufrisk/MemProcFS/wiki/resources/proc_virt2phys.png" height="225"/></p>
 
-Extensive Python and C/C++ API:
+Extensive Python, C# and C/C++ API:
 ===============================
-Everything in MemProcFS is exposed as APIs. APIs exist for both C/C++ `vmmdll.h` and Python `vmmpy.py`. The file system itself is made available virtually via the API without the need to mount it. Specialized process analysis and process alteration functionality is made easy by calling API functionality. It is possible to read both virtual process memory as well as physical memory! The example below shows reading 0x20 bytes from physical address 0x1000:
+Everything in MemProcFS is exposed as APIs. APIs exist for both C/C++ `vmmdll.h`, C# `vmmsharp.cs` and Python `memprocfs.py`. The file system itself is made available virtually via the API without the need to mount it. SIt is possible to read both virtual process memory as well as physical memory! The example below shows reading 0x20 bytes from physical address 0x1000:
 ```
->>> from vmmpy import *
->>> VmmPy_Initialize('c:/temp/win10_memdump.raw')
->>> print(VmmPy_UtilFillHexAscii(VmmPy_MemRead(-1, 0x1000, 0x20)))
+>>> import memprocfs
+>>> vmm = memprocfs.Vmm(['-device', 'c:/temp/win10_memdump.raw'])
+>>> print(vmm.hex( vmm.memory.read(0x1000, 0x20) ))
 0000    e9 4d 06 00 01 00 00 00  01 00 00 00 3f 00 18 10   .M..........?...
 0010    00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00   ................
 ```
@@ -74,7 +76,7 @@ Or register the memory dump file extension with MemProcFS.exe so that the file s
 - mount the memory dump file as S: <br>`memprocfs.exe -mount s -device c:\temp\win10x64-dump.raw`
 - mount live target memory, in verbose read-only mode, with DumpIt in /LIVEKD mode: <br>`DumpIt.exe /LIVEKD /A memprocfs.exe /C "-v"`
 - mount live target memory, in read-only mode, with WinPMEM driver: <br>`memprocfs.exe -device pmem`
-- mount live target memory, in read/write mode, with PCILeech FPGA memory acquisition device: <br>`memprocfs.exe -device fpga`
+- mount live target memory, in read/write mode, with PCILeech FPGA memory acquisition device: <br>`memprocfs.exe -device fpga -memmap auto`
 - mount live target memory, in read/write mode, with TotalMeltdown vulnerability acquisition device: <br>`memprocfs.exe -device totalmeltdown`
 - mount a memory dump with a corresponding page files: <br>`memprocfs.exe -device unknown-x64-dump.raw -pagefile0 pagefile.sys -pagefile1 swapfile.sys`
 
@@ -82,8 +84,10 @@ Documentation:
 ==============
 For additional documentation please check out the [project wiki](https://github.com/ufrisk/MemProcFS/wiki) for in-depth detailed information about the file system itself, its API and its plugin modules! For additional information about memory acqusition methods check out the [LeechCore project](https://github.com/ufrisk/LeechCore/)
 
-Also check out my Microsoft BlueHatIL 2019 talk _Practical Uses for Hardware-assisted Memory Visualization_ about MemProcFS at Youtube below:
-<p align="center"><a href="https://www.youtube.com/watch?v=Da_9SV9FA34" alt="Microsoft BlueHatIL 2019 talk - Practical Uses for Hardware-assisted Memory Visualization" target="_new"><img src="http://img.youtube.com/vi/Da_9SV9FA34/0.jpg" height="250"/></a></p>
+Also check out my Microsoft BlueHatIL 2019 talk _Practical Uses for Hardware-assisted Memory Visualization_ and my Disobey 2020 talk _Live Memory Attacks and Forensics_ about MemProcFS.
+
+<p align="center"><a href="https://www.youtube.com/watch?v=Da_9SV9FA34" alt="Microsoft BlueHatIL 2019 talk - Practical Uses for Hardware-assisted Memory Visualization" target="_new"><img src="http://img.youtube.com/vi/Da_9SV9FA34/0.jpg" height="250"/></a> <a href="https://youtu.be/mca3rLsHuTA?t=952" alt="Disobey 2020 talk - Live Memory Attacks and Forensics" target="_new"><img src="http://img.youtube.com/vi/mca3rLsHuTA/0.jpg" height="250"/></a></p>
+
 
 Building:
 =========
@@ -102,20 +106,37 @@ Please find some ideas for possible future expansions of the memory process file
 
 ### Other items:
 - Hash lookup of executable memory pages in DB.
-- Additional file recovery.
-- PFN support.
+- Forensic mode more more analysis tasks.
+- Forensic mode JSON file generation.
 
 License:
-======
-The project source code is released under GPLv3. Some bundled Microsoft redistributable binaries are released under separate licenses.
+========
+The project source code is released under: GNU Affero General Public License v3.0. Some bundled dependencies and plugins are released under GPLv3. Some bundled Microsoft redistributable binaries are released under separate licenses. Alternative licensing may be possible.
+
+Contributing:
+=============
+PCILeech, MemProcFS and LeechCore are open source but not open contribution. PCILeech, MemProcFS and LeechCore offers a highly flexible plugin architecture that will allow for contributions in the form of plugins. If you wish to make a contribution, other than a plugin, to the core projects please contact me before starting to develop.
 
 Links:
 ======
-* Blog: http://blog.frizk.net
-* Twitter: https://twitter.com/UlfFrisk
-* PCILeech: https://github.com/ufrisk/pcileech/
-* LeechCore: https://github.com/ufrisk/LeechCore/
+* Twitter: [![Twitter](https://img.shields.io/twitter/follow/UlfFrisk?label=UlfFrisk&style=social)](https://twitter.com/intent/follow?screen_name=UlfFrisk)
+* Discord: [![Discord | Porchetta Industries](https://img.shields.io/discord/736724457258745996.svg?label=&logo=discord&logoColor=ffffff&color=7389D8&labelColor=6A7EC2)](https://discord.gg/sEkn3aa)
+* PCILeech: https://github.com/ufrisk/pcileech
+* PCILeech FPGA: https://github.com/ufrisk/pcileech-fpga
+* LeechCore: https://github.com/ufrisk/LeechCore
+* MemProcFS: https://github.com/ufrisk/MemProcFS
 * YouTube: https://www.youtube.com/channel/UC2aAi-gjqvKiC7s7Opzv9rg
+* Blog: http://blog.frizk.net
+
+Support PCILeech/MemProcFS development:
+=======================================
+PCILeech and MemProcFS are hobby projects of mine. I put a lot of time and energy into my projects. The time being most of my spare time. Since some aspects also relate to hardware I also put quite some of money into my projects. If you think PCILeech and/or MemProcFS are awesome tools and/or if you had a use for them it's now possible to contribute. It's possible to sponsor via Github Sponsors.
+
+ - Github Sponsors: [`https://github.com/sponsors/ufrisk`](https://github.com/sponsors/ufrisk)
+ 
+To all my sponsors, Thank You :sparkling_heart:
+
+All sponsorships are welcome, no matter how large or small. I especially wish to thank my **bronze sponsors**: [grandprixgp](https://github.com/grandprixgp).
 
 Changelog:
 ===================
@@ -151,3 +172,68 @@ v1.1-v2.10
   * Physical memory map.
   * Per-page physical memory information (PFN database).
   * Registry "big data" value type support.
+
+[v3.3](https://github.com/ufrisk/MemProcFS/releases/tag/v3.3)
+* Bug fixes.
+* Better write support.
+* AMD Ryzen FPGA support.
+* Module map: new info - Full .DLL Path.
+* Thread map: new info - CPU registers.
+* New forensic mode:
+  * Timelining.
+  * NTFS MFT parsing.
+  * SQLITE database generation.
+* New Features:
+  * Minidump .DMP file generation for individual processes.
+  * Syscalls - nt & win32k.
+  
+[v3.4](https://github.com/ufrisk/MemProcFS/releases/tag/v3.4)
+* Bug fixes.
+* Support for [LiveCloudKd](https://github.com/ufrisk/LeechCore/wiki/Device_LiveCloudKd).
+* Network UDP and TCP listen socket support.
+* C# API and examples - located in `vmmsharp` project.
+
+[v3.5](https://github.com/ufrisk/MemProcFS/releases/tag/v3.5)
+* Bug fixes.
+* New Features:
+  * Minidump for live processes.
+  * Services information.
+  * Memmap: Verbose VAD with individual page info.
+
+[v3.6](https://github.com/ufrisk/MemProcFS/releases/tag/v3.6)
+* Bug fixes & refactorings.
+* NB! Breaking C/C++ API changes (function renames).
+* New Features:
+  * Unloaded modules.
+  * [FindEvil](https://github.com/ufrisk/MemProcFS/wiki/FS_FindEvil) - find select signs of injections and malware.
+ 
+[v3.7](https://github.com/ufrisk/MemProcFS/releases/tag/v3.7)
+* Updates & Improvements:
+  * Registry.
+  * Services.
+  * NTFS MFT.
+* New Features:
+  * Time: process-time, boot-time, current-time, timezone.
+  * Python Light Plugins: print('file system plugins as easy as Python print!')
+  * Registry Parsing: usb-storage, bluetooth, wallpapers and more in 'py/reg' & 'py/by-user/reg'.
+  
+[v3.8](https://github.com/ufrisk/MemProcFS/releases/tag/v3.8)
+* Updates & Improvements:
+  * Rename 'sysinfo' directory to 'sys'.
+  * Better os detection (symbol fallback).
+  * Handles: additional object info.
+  * Info header in most info-files (enabled by default - possible to disable).
+* New Features:
+  * Windows Kernel Object Manager Objects.
+  * Additional kernel driver information.
+  * Detailed Object and Object Header Info.
+
+[v3.9](https://github.com/ufrisk/MemProcFS/releases/tag/v3.9)
+* Bug fixes.
+* License Change: GNU Affero General Public License v3.0.
+* Updates & Improvements:
+  * Faster and more robust parsing of physical memory map
+  * Rename per-process `user` to `token` and add more info.
+* New Features:
+  * New [Python API](https://github.com/ufrisk/MemProcFS/wiki/API_Python) now also available on [Python pip](https://pypi.org/project/memprocfs/). Check out the [YouTube demo](https://youtu.be/pLFU1lxBNM0)!
+  * `py/reg/net/tcpip_interfaces.txt`

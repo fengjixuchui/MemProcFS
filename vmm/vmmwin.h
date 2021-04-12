@@ -1,97 +1,30 @@
 // vmmwin.h : definitions related to windows operating system and processes.
 // parsing of virtual memory. Windows related features only.
 //
-// (c) Ulf Frisk, 2018-2020
+// (c) Ulf Frisk, 2018-2021
 // Author: Ulf Frisk, pcileech@frizk.net
 //
 #ifndef __VMMWIN_H__
 #define __VMMWIN_H__
 #include "vmm.h"
 
-typedef struct tdVMMWIN_EAT_ENTRY {
-    QWORD vaFunction;
-    DWORD vaFunctionOffset;
-    CHAR szFunction[40];
-} VMMPROC_WINDOWS_EAT_ENTRY, *PVMMPROC_WINDOWS_EAT_ENTRY;
-
-typedef struct tdVMMWIN_IAT_ENTRY {
-    ULONG64 vaFunction;
-    CHAR szFunction[40];
-    CHAR szModule[64];
-} VMMWIN_IAT_ENTRY, *PVMMWIN_IAT_ENTRY;
-
 /*
-* Load the size of the required display buffer for sections, imports and export
-* into the pModuleEx struct. The size is a direct consequence of the number of
-* functions since fixed line sizes are used for all these types. Loading is
-* done in a recource efficient way to minimize I/O as much as possible.
+* Initialize EAT (exported functions) for a specific module.
+* CALLER DECREF: return
 * -- pProcess
 * -- pModule
-*/
-VOID VmmWin_PE_SetSizeSectionIATEAT_DisplayBuffer(_In_ PVMM_PROCESS pProcess, _In_ PVMM_MAP_MODULEENTRY pModule);
-
-/*
-* Walk the export address table (EAT) from a given pProcess and store it in the
-* in the caller supplied pEATs/pcEATs structures.
-* -- pProcess
-* -- pModule
-* -- pEATs
-* -- cEATs
-* -- pcEATs = number of actual items of pEATs written.
 * -- return
 */
-_Success_(return)
-BOOL VmmWin_PE_LoadEAT_DisplayBuffer(_In_ PVMM_PROCESS pProcess, _In_ PVMM_MAP_MODULEENTRY pModule, _Out_writes_opt_(cEATs) PVMMPROC_WINDOWS_EAT_ENTRY pEATs, _In_ DWORD cEATs, _Out_ PDWORD pcEATs);
+PVMMOB_MAP_EAT VmmWinEAT_Initialize(_In_ PVMM_PROCESS pProcess, _In_ PVMM_MAP_MODULEENTRY pModule);
 
 /*
-* Walk the import address table (IAT) from a given pProcess and store it in the
-* in the caller supplied pIATs/pcIATs structures.
+* Initialize IAT (imported functions) for a specific module.
+* CALLER DECREF: return
 * -- pProcess
 * -- pModule
-* -- pIATs
-* -- cIATs
-* -- pcIATs = number of actual items of pIATs on exit
+* -- return
 */
-VOID VmmWin_PE_LoadIAT_DisplayBuffer(_In_ PVMM_PROCESS pProcess, _In_ PVMM_MAP_MODULEENTRY pModule, _Out_writes_(*pcIATs) PVMMWIN_IAT_ENTRY pIATs, _In_ DWORD cIATs, _Out_ PDWORD pcIATs);
-
-/*
-* Fill the pbDisplayBuffer with a human readable version of the data directories.
-* This is guaranteed to be exactly 864 bytes (excluding NULL terminator).
-* Alternatively copy the 16 data directories into pDataDirectoryOpt.
-* -- pProcess
-* -- pModule
-* -- pbDisplayBufferOpt
-* -- cbDisplayBufferMax
-* -- pcbDisplayBuffer
-* -- pDataDirectoryOpt
-*/
-VOID VmmWin_PE_DIRECTORY_DisplayBuffer(
-    _In_ PVMM_PROCESS pProcess,
-    _In_ PVMM_MAP_MODULEENTRY pModule,
-    _Out_writes_bytes_opt_(*pcbDisplayBuffer) PBYTE pbDisplayBufferOpt,
-    _In_ DWORD cbDisplayBufferMax,
-    _Out_opt_ PDWORD pcbDisplayBuffer,
-    _Out_writes_opt_(16) PIMAGE_DATA_DIRECTORY pDataDirectoryOpt);
-
-/*
-* Fill the pbDisplayBuffer with a human readable version of the PE sections.
-* Alternatively copy the sections into the pSectionsOpt buffer.
-* -- pProcess
-* -- pModule
-* -- pbDisplayBufferOpt
-* -- cbDisplayBufferMax
-* -- pcbDisplayBuffer
-* -- pcSectionsOpt = size of buffer pSectionsOpt on entry, # returned entries on exit
-* -- pSectionsOpt
-*/
-VOID VmmWin_PE_SECTION_DisplayBuffer(
-    _In_ PVMM_PROCESS pProcess,
-    _In_ PVMM_MAP_MODULEENTRY pModule,
-    _Out_writes_bytes_opt_(*pcbDisplayBuffer) PBYTE pbDisplayBufferOpt,
-    _In_ DWORD cbDisplayBufferMax,
-    _Out_opt_ PDWORD pcbDisplayBuffer,
-    _Inout_opt_ PDWORD pcSectionsOpt,
-    _Out_writes_opt_(*pcSectionsOpt) PIMAGE_SECTION_HEADER pSectionsOpt);
+PVMMOB_MAP_IAT VmmWinIAT_Initialize(_In_ PVMM_PROCESS pProcess, _In_ PVMM_MAP_MODULEENTRY pModule);
 
 /*
 * Try initialize PteMap text descriptions. This function will first try to pop-
@@ -101,17 +34,26 @@ VOID VmmWin_PE_SECTION_DisplayBuffer(
 * -- return
 */
 _Success_(return)
-BOOL VmmWin_InitializePteMapText(_In_ PVMM_PROCESS pProcess);
+BOOL VmmWinPte_InitializeMapText(_In_ PVMM_PROCESS pProcess);
 
 /*
 * Initialize the module map containing information about loaded modules in the
 * system. This is performed by a PEB/Ldr walk/scan of in-process memory
 * structures. This may be unreliable if a process is obfuscated or tampered.
 * -- pProcess
+* -- psvaInjected = optional set of injected addresses, updated on exit.
 * -- return
 */
 _Success_(return)
-BOOL VmmWin_InitializeLdrModules(_In_ PVMM_PROCESS pProcess);
+BOOL VmmWinLdrModule_Initialize(_In_ PVMM_PROCESS pProcess, _Inout_opt_ POB_SET psvaInjected);
+
+/*
+* Initialize the unloaded module map containing information about unloaded modules.
+* -- pProcess
+* -- return
+*/
+_Success_(return)
+BOOL VmmWinUnloadedModule_Initialize(_In_ PVMM_PROCESS pProcess);
 
 /*
 * Initialize the meap map containing information about the process heaps in the
@@ -127,10 +69,9 @@ BOOL VmmWinHeap_Initialize(_In_ PVMM_PROCESS pProcess);
 * NB! The threading sub-system is dependent on pdb symbols and may take a small
 * amount of time before it's available after system startup.
 * -- pProcess
-* -- fNonBlocking
 * -- return
 */
-BOOL VmmWinThread_Initialize(_In_ PVMM_PROCESS pProcess, _In_ BOOL fNonBlocking);
+BOOL VmmWinThread_Initialize(_In_ PVMM_PROCESS pProcess);
 
 /*
 * Initialize Handles for a specific process. Extended information text may take
@@ -153,14 +94,32 @@ _Success_(return != NULL)
 PVMMWIN_OBJECT_TYPE VmmWin_ObjectTypeGet(_In_ BYTE iObjectType);
 
 /*
+* _OBJECT_HEADER.TypeIndex is encoded on Windows 10 - this function decodes it.
+* https://medium.com/@ashabdalhalim/e8f907e7073a
+* -- vaObjectHeader
+* -- iTypeIndexTableEncoded
+* -- return
+*/
+BYTE VmmWin_ObjectTypeGetIndexFromEncoded(_In_ QWORD vaObjectHeader, _In_ BYTE iTypeIndexTableEncoded);
+
+/*
 * Try walk the EPROCESS list in the Windows kernel to enumerate processes into
 * the VMM/PROC file system.
 * NB! This may be done to refresh an existing PID cache hence migration code.
-* -- fTotalRefresh = create completely new process entries (instead of updating).
 * -- pSystemProcess
+* -- fTotalRefresh = create completely new process entries (instead of updating).
+* -- psvaNoLinkEPROCESS = optional set of no-link EPROCESS virtual addresses.
 * -- return
 */
-BOOL VmmWin_EnumerateEPROCESS(_In_ PVMM_PROCESS pSystemProcess, _In_ BOOL fRefreshTotal);
+BOOL VmmWinProcess_Enumerate(_In_ PVMM_PROCESS pSystemProcess, _In_ BOOL fRefreshTotal, _In_opt_ POB_SET psvaNoLinkEPROCESS);
+
+/*
+* Locate EPROCESS objects not linked by the EPROCESS list.
+* This is achieved by analyzing the object table for the SYSTEM process.
+* CALLER DECREF: return
+* -- return = Set of vaEPROCESS if no-link addresses exist. NULL otherwise.
+*/
+POB_SET VmmWinProcess_Enumerate_FindNoLinkProcesses();
 
 /*
 * Walk a windows linked list in an efficient way that minimize IO requests to
@@ -179,7 +138,7 @@ BOOL VmmWin_EnumerateEPROCESS(_In_ PVMM_PROCESS pSystemProcess, _In_ BOOL fRefre
 * -- cbData
 * -- pfnCallback_Pre = optional callback function to gather additional addresses.
 * -- pfnCallback_Post = optional callback function called after all pages fetched into cache.
-* -- pContainerPrefetch = optional pointer to a PVMMOBCONTAINER containing a POB_VSET of prefetch addresses to use/update.
+* -- pPrefetchAddressContainer = optional pointer to a PVMMOBCONTAINER containing a POB_VSET of prefetch addresses to use/update.
 */
 VOID VmmWin_ListTraversePrefetch(
     _In_ PVMM_PROCESS pProcess,

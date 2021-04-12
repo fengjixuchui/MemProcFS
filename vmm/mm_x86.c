@@ -1,6 +1,6 @@
 // mm_x86.c : implementation of the x86 32-bit protected mode memory model.
 //
-// (c) Ulf Frisk, 2018-2020
+// (c) Ulf Frisk, 2018-2021
 // Author: Ulf Frisk, pcileech@frizk.net
 //
 #include "vmm.h"
@@ -24,7 +24,7 @@ BOOL MmX86_TlbPageTableVerify(_Inout_ PBYTE pb, _In_ QWORD pa, _In_ BOOL fSelfRe
 */
 VOID MmX86_TlbSpider(_In_ PVMM_PROCESS pProcess)
 {
-    PVMMOB_MEM pObPD = NULL;
+    PVMMOB_CACHE_MEM pObPD = NULL;
     DWORD i, pte;
     POB_SET pObPageSet = NULL;
     if(pProcess->fTlbSpiderDone) { return; }
@@ -49,20 +49,22 @@ const DWORD MMX86_PAGETABLEMAP_PML_REGION_SIZE[3] = { 0, 12, 22 };
 
 VOID MmX86_MapInitialize_Index(_In_ PVMM_PROCESS pProcess, _In_ PVMM_MAP_PTEENTRY pMemMap, _In_ PDWORD pcMemMap, _In_ DWORD vaBase, _In_ BYTE iPML, _In_ DWORD PTEs[1024], _In_ BOOL fSupervisorPML, _In_ QWORD paMax)
 {
-    PVMMOB_MEM pObNextPT;
+    PVMMOB_CACHE_MEM pObNextPT;
     DWORD i, va, pte;
-    BOOL fUserOnly, fNextSupervisorPML, fTransition = FALSE;
+    QWORD cPages;
+    BOOL fUserOnly, fNextSupervisorPML, fPagedOut = FALSE;
     PVMM_MAP_PTEENTRY pMemMapEntry = pMemMap + *pcMemMap - 1;
     fUserOnly = pProcess->fUserOnly;
     for(i = 0; i < 1024; i++) {
         pte = PTEs[i];
         if(!MMX86_PTE_IS_VALID(pte, iPML)) {
-            if(pte && MMX86_PTE_IS_TRANSITION(pte, iPML)) {
-                pte = MMX86_PTE_IS_TRANSITION(pte, iPML);   // TRANSITION PAGE
-                fTransition = TRUE;
-            } else {
-                continue;                                   // INVALID
-            }
+            if(!pte) { continue; }
+            if(iPML != 1) { continue; }
+            pte = MMX86_PTE_IS_TRANSITION(pte, iPML);
+            pte = 0x00000005 | (pte ? (pte & 0xfffff000) : 0);  // GUESS READ-ONLY USER PAGE IF NON TRANSITION
+            fPagedOut = TRUE;
+        } else {
+            fPagedOut = FALSE;
         }
         if((pte & 0xfffff000) > paMax) { continue; }
         if(fSupervisorPML) { pte = pte & 0xfffffffb; }
@@ -70,18 +72,22 @@ VOID MmX86_MapInitialize_Index(_In_ PVMM_PROCESS pProcess, _In_ PVMM_MAP_PTEENTR
         va = vaBase + (i << MMX86_PAGETABLEMAP_PML_REGION_SIZE[iPML]);
         if((iPML == 1) || (pte & 0x80) /* PS */) {
             if((*pcMemMap == 0) ||
-                ((pMemMapEntry->fPage != (pte & VMM_MEMMAP_PAGE_MASK)) && !fTransition) ||
+                ((pMemMapEntry->fPage != (pte & VMM_MEMMAP_PAGE_MASK)) && !fPagedOut) ||
                 (va != pMemMapEntry->vaBase + (pMemMapEntry->cPages << 12))) {
                 if(*pcMemMap + 1 >= VMM_MEMMAP_ENTRIES_MAX) { return; }
                 pMemMapEntry = pMemMap + *pcMemMap;
                 pMemMapEntry->vaBase = va;
                 pMemMapEntry->fPage = pte & VMM_MEMMAP_PAGE_MASK;
-                pMemMapEntry->cPages = 1ULL << (MMX86_PAGETABLEMAP_PML_REGION_SIZE[iPML] - 12);
+                cPages = 1ULL << (MMX86_PAGETABLEMAP_PML_REGION_SIZE[iPML] - 12);
+                if(fPagedOut) { pMemMapEntry->cSoftware += (DWORD)cPages; }
+                pMemMapEntry->cPages = cPages;
                 *pcMemMap = *pcMemMap + 1;
                 if(*pcMemMap >= VMM_MEMMAP_ENTRIES_MAX - 1) { return; }
                 continue;
             }
-            pMemMapEntry->cPages += 1ULL << (MMX86_PAGETABLEMAP_PML_REGION_SIZE[iPML] - 12);
+            cPages = 1ULL << (MMX86_PAGETABLEMAP_PML_REGION_SIZE[iPML] - 12);
+            if(fPagedOut) { pMemMapEntry->cSoftware += (DWORD)cPages; }
+            pMemMapEntry->cPages += cPages;
             continue;
         }
         // maps page table
@@ -94,10 +100,15 @@ VOID MmX86_MapInitialize_Index(_In_ PVMM_PROCESS pProcess, _In_ PVMM_MAP_PTEENTR
     }
 }
 
+VOID MmX86_CallbackCleanup_ObPteMap(PVMMOB_MAP_PTE pOb)
+{
+    LocalFree(pOb->wszMultiText);
+}
+
 _Success_(return)
 BOOL MmX86_PteMapInitialize(_In_ PVMM_PROCESS pProcess)
 {
-    PVMMOB_MEM pObPD;
+    PVMMOB_CACHE_MEM pObPD;
     DWORD cMemMap = 0;
     PVMM_MAP_PTEENTRY pMemMap = NULL;
     PVMMOB_MAP_PTE pObMap = NULL;
@@ -119,7 +130,7 @@ BOOL MmX86_PteMapInitialize(_In_ PVMM_PROCESS pProcess)
         Ob_DECREF(pObPD);
     }
     // allocate VmmOb depending on result
-    pObMap = Ob_Alloc(OB_TAG_MAP_PTE, 0, sizeof(VMMOB_MAP_PTE) + cMemMap * sizeof(VMM_MAP_PTEENTRY), NULL, NULL);
+    pObMap = Ob_Alloc(OB_TAG_MAP_PTE, 0, sizeof(VMMOB_MAP_PTE) + cMemMap * sizeof(VMM_MAP_PTEENTRY), MmX86_CallbackCleanup_ObPteMap, NULL);
     if(!pObMap) {
         pProcess->Map.pObPte = Ob_Alloc(OB_TAG_MAP_PTE, LMEM_ZEROINIT, sizeof(VMMOB_MAP_PTE), NULL, NULL);
         LeaveCriticalSection(&pProcess->LockUpdate);
@@ -141,7 +152,7 @@ _Success_(return)
 BOOL MmX86_Virt2Phys(_In_ QWORD paPT, _In_ BOOL fUserOnly, _In_ BYTE iPML, _In_ QWORD va, _Out_ PQWORD ppa)
 {
     DWORD pte, i;
-    PVMMOB_MEM pObPTEs;
+    PVMMOB_CACHE_MEM pObPTEs;
     //PBYTE pbPTEs;
     if(va > 0xffffffff) { return FALSE; }
     if(paPT > 0xffffffff) { return FALSE; }
@@ -169,9 +180,44 @@ BOOL MmX86_Virt2Phys(_In_ QWORD paPT, _In_ BOOL fUserOnly, _In_ BYTE iPML, _In_ 
     return TRUE;
 }
 
+VOID MmX86_Virt2PhysVadEx(_In_ QWORD paPT, _Inout_ PVMMOB_MAP_VADEX pVadEx, _In_ BYTE iPML, _Inout_ PDWORD piVadEx)
+{
+    DWORD pte, iPte, iVadEx;
+    PVMMOB_CACHE_MEM pObPTEs = NULL;
+    if(iPML == (BYTE)-1) { iPML = 2; }
+    if((pVadEx->pMap[*piVadEx].va > 0xffffffff) || (paPT > 0xffffffff) || !(pObPTEs = VmmTlbGetPageTable(paPT & 0xfffff000, FALSE))) {
+        *piVadEx = *piVadEx + 1;
+        return;
+    }
+next_entry:
+    iVadEx = *piVadEx;
+    iPte = 0x3ff & (pVadEx->pMap[iVadEx].va >> MMX86_PAGETABLEMAP_PML_REGION_SIZE[iPML]);
+    pte = pObPTEs->pdw[iPte];
+    if(!MMX86_PTE_IS_VALID(pte, iPML)) { goto next_check; } // NOT VALID
+    if(!(pte & 0x04)) { goto next_check; }                  // SUPERVISOR PAGE & USER MODE REQ
+    if((iPML == 2) && !(pte & 0x80) /* PS */) {
+        MmX86_Virt2PhysVadEx(pte, pVadEx, 1, piVadEx);
+        Ob_DECREF(pObPTEs);
+        return;
+    }
+    if(iPML == 1) {                     // 4kB PAGE
+        pVadEx->pMap[iVadEx].pa = pte & 0xfffff000;
+        pVadEx->pMap[iVadEx].tp = VMM_PTE_TP_HARDWARE;
+    } else if(!(pte & 0x003e0000)) {    // 4MB PAGE
+        pVadEx->pMap[iVadEx].pa = (((QWORD)(pte & 0x0001e000)) << (32 - 13)) + (pte & 0xffc00000) + (pVadEx->pMap[iVadEx].va & 0x003ff000);
+        pVadEx->pMap[iVadEx].tp = VMM_PTE_TP_HARDWARE;
+    }
+next_check:
+    pVadEx->pMap[iVadEx].pte = pte;
+    pVadEx->pMap[iVadEx].iPML = iPML;
+    *piVadEx = *piVadEx + 1;
+    if((iPML == 1) && (iPte < 0x3ff) && (iVadEx + 1 < pVadEx->cMap) && (pVadEx->pMap[iVadEx].va + 0x1000 == pVadEx->pMap[iVadEx + 1].va)) { goto next_entry; }
+    Ob_DECREF(pObPTEs);
+}
+
 VOID MmX86_Virt2PhysGetInformation_DoWork(_Inout_ PVMM_PROCESS pProcess, _Inout_ PVMM_VIRT2PHYS_INFORMATION pVirt2PhysInfo, _In_ BYTE iPML, _In_ QWORD paPT)
 {
-    PVMMOB_MEM pObPTEs;
+    PVMMOB_CACHE_MEM pObPTEs;
     DWORD pte, i;
     pObPTEs = VmmTlbGetPageTable(paPT, FALSE);
     if(!pObPTEs) { return; }
@@ -211,7 +257,7 @@ VOID MmX86_Phys2VirtGetInformation_Index(_In_ PVMM_PROCESS pProcess, _In_ DWORD 
     BOOL fUserOnly;
     QWORD pa;
     DWORD i, va, pte;
-    PVMMOB_MEM pObNextPT;
+    PVMMOB_CACHE_MEM pObNextPT;
     if(!pProcess->fTlbSpiderDone) {
         VmmTlbSpider(pProcess);
     }
@@ -251,7 +297,7 @@ VOID MmX86_Phys2VirtGetInformation_Index(_In_ PVMM_PROCESS pProcess, _In_ DWORD 
 
 VOID MmX86_Phys2VirtGetInformation(_In_ PVMM_PROCESS pProcess, _Inout_ PVMMOB_PHYS2VIRT_INFORMATION pP2V)
 {
-    PVMMOB_MEM pObPD;
+    PVMMOB_CACHE_MEM pObPD;
     if((pP2V->cvaList == VMM_PHYS2VIRT_INFORMATION_MAX_PROCESS_RESULT) || (pP2V->paTarget > ctxMain->dev.paMax)) { return; }
     pObPD = VmmTlbGetPageTable(pProcess->paDTB & 0xfffff000, FALSE);
     if(!pObPD) { return; }
@@ -273,6 +319,7 @@ VOID MmX86_Initialize()
     }
     ctxVmm->fnMemoryModel.pfnClose = MmX86_Close;
     ctxVmm->fnMemoryModel.pfnVirt2Phys = MmX86_Virt2Phys;
+    ctxVmm->fnMemoryModel.pfnVirt2PhysVadEx = MmX86_Virt2PhysVadEx;
     ctxVmm->fnMemoryModel.pfnVirt2PhysGetInformation = MmX86_Virt2PhysGetInformation;
     ctxVmm->fnMemoryModel.pfnPhys2VirtGetInformation = MmX86_Phys2VirtGetInformation;
     ctxVmm->fnMemoryModel.pfnPteMapInitialize = MmX86_PteMapInitialize;

@@ -1,6 +1,6 @@
 // util.c : implementation of various utility functions.
 //
-// (c) Ulf Frisk, 2018-2020
+// (c) Ulf Frisk, 2018-2021
 // Author: Ulf Frisk, pcileech@frizk.net
 //
 #include "util.h"
@@ -44,6 +44,21 @@ DWORD Util_HashStringA(_In_opt_ LPCSTR sz)
     }
 }
 
+DWORD Util_HashStringUpperA(_In_opt_ LPCSTR sz)
+{
+    CHAR c;
+    DWORD i = 0, dwHash = 0;
+    if(!sz) { return 0; }
+    while(TRUE) {
+        c = sz[i++];
+        if(!c) { return dwHash; }
+        if(c >= 'a' && c <= 'z') {
+            c += 'A' - 'a';
+        }
+        dwHash = ((dwHash >> 13) | (dwHash << 19)) + c;
+    }
+}
+
 DWORD Util_HashStringUpperW(_In_opt_ LPCWSTR wsz)
 {
     WCHAR c;
@@ -59,10 +74,46 @@ DWORD Util_HashStringUpperW(_In_opt_ LPCWSTR wsz)
     }
 }
 
+/*
+* Hash a registry key name in a way that is supported by the file system.
+* NB! this is not the same hash as the Windows registry uses.
+* -- wsz
+* -- iSuffix
+* -- return
+*/
+DWORD Util_HashNameW_Registry(_In_ LPCWSTR wsz, _In_opt_ DWORD iSuffix)
+{
+    DWORD i, c, dwHash = 0;
+    WCHAR wszBuffer[MAX_PATH];
+    c = Util_PathFileNameFix_Registry(wszBuffer, NULL, wsz, 0, iSuffix, TRUE);
+    for(i = 0; i < c; i++) {
+        dwHash = ((dwHash >> 13) | (dwHash << 19)) + wszBuffer[i];
+    }
+    return dwHash;
+}
+
+/*
+* Hash a path. Used to calculate a registry key hash from a file system path.
+* -- wszPath
+* -- return
+*/
+QWORD Util_HashPathW_Registry(_In_ LPWSTR wszPath)
+{
+    DWORD dwHashName;
+    QWORD qwHashTotal = 0;
+    WCHAR wsz1[MAX_PATH];
+    while(wszPath && wszPath[0]) {
+        wszPath = Util_PathSplit2_ExWCHAR(wszPath, wsz1, _countof(wsz1));
+        dwHashName = Util_HashNameW_Registry(wsz1, 0);
+        qwHashTotal = dwHashName + ((qwHashTotal >> 13) | (qwHashTotal << 51));
+    }
+    return qwHashTotal;
+}
+
 #define Util_2HexChar(x) (((((x) & 0xf) <= 9) ? '0' : ('a' - 10)) + ((x) & 0xf))
 
 _Success_(return)
-BOOL Util_FillHexAscii(_In_opt_ PBYTE pb, _In_ DWORD cb, _In_ DWORD cbInitialOffset, _Out_opt_ LPSTR sz, _Inout_ PDWORD pcsz)
+BOOL Util_FillHexAscii(_In_reads_opt_(cb) PBYTE pb, _In_ DWORD cb, _In_ DWORD cbInitialOffset, _Out_writes_opt_(*pcsz) LPSTR sz, _Inout_ PDWORD pcsz)
 {
     DWORD i, j, o = 0, iMod, cRows;
     // checks
@@ -119,7 +170,7 @@ BOOL Util_FillHexAscii(_In_opt_ PBYTE pb, _In_ DWORD cb, _In_ DWORD cbInitialOff
     return TRUE;
 }
 
-VOID Util_PrintHexAscii(_In_ PBYTE pb, _In_ DWORD cb, _In_ DWORD cbInitialOffset)
+VOID Util_PrintHexAscii(_In_reads_(cb) PBYTE pb, _In_ DWORD cb, _In_ DWORD cbInitialOffset)
 {
     DWORD szMax = 0;
     LPSTR sz;
@@ -151,6 +202,7 @@ DWORD Util_PathFileNameFixA(_Out_writes_(MAX_PATH) LPWSTR wszOut, _In_ LPCSTR sz
         wszOut[i] = ((ch < 128) && (UTIL_ASCIIFILENAME_ALLOW[ch] == '0')) ? '_' : ch;
         i++;
     }
+    if(i && (wszOut[i - 1] == '.')) { wszOut[i - 1] = '_'; }
     wszOut[i] = 0;
     return i;
 }
@@ -163,6 +215,7 @@ DWORD Util_PathFileNameFixW(_Out_writes_(MAX_PATH) LPWSTR wszOut, _In_ LPCWSTR w
         wszOut[i] = ((ch < 128) && (UTIL_ASCIIFILENAME_ALLOW[ch] == '0')) ? '_' : ch;
         i++;
     }
+    if(i && (wszOut[i - 1] == '.')) { wszOut[i - 1] = '_'; }
     wszOut[i] = 0;
     return i;
 }
@@ -182,10 +235,17 @@ DWORD Util_PathFileNameFix_Registry(_Out_writes_(MAX_PATH) LPWSTR wszOut, _In_op
             i++;
         }
     }
-    if(iSuffix && (iSuffix < 10) && (i < MAX_PATH - 3)) {
-        wszOut[i++] = '-';
-        wszOut[i++] = '0' + (WCHAR)iSuffix;
+    if(iSuffix) {
+        if((iSuffix < 10) && (i < MAX_PATH - 3)) {
+            wszOut[i++] = '-';
+            wszOut[i++] = '0' + (WCHAR)iSuffix;
+        } else if((iSuffix < 100) && (i < MAX_PATH - 4)) {
+            wszOut[i++] = '-';
+            wszOut[i++] = '0' + (WCHAR)(iSuffix / 10);
+            wszOut[i++] = '0' + (WCHAR)(iSuffix % 10);
+        }
     }
+    if(i && (wszOut[i - 1] == '.')) { wszOut[i - 1] = '_'; }
     wszOut[i] = 0;
     return i;
 }
@@ -288,23 +348,100 @@ int Util_wcsstrncmp(_In_ LPSTR sz, _In_ LPWSTR wsz, _In_opt_ DWORD cMax)
 }
 
 _Success_(return >= 0)
-DWORD Util_snprintf_ln(
-    _Out_writes_(min(cszBuffer, cszLineLength + 1)) LPSTR szBuffer,
-    _In_ QWORD cszBuffer,
-    _In_ QWORD cszLineLength,
-    _In_z_ _Printf_format_string_ LPSTR szFormat,
+size_t Util_snwprintf_u8(
+    _Out_writes_z_(cbBuffer) LPSTR szBuffer,
+    _In_ QWORD cbBuffer,
+    _In_z_ _Printf_format_string_ LPWSTR wszFormat,
     ...
-) {
-    int status;
+)
+{
+    int cch;
     va_list arglist;
-    va_start(arglist, szFormat);
-    status = vsnprintf(szBuffer, min(cszBuffer, cszLineLength + 1), szFormat, arglist);
-    va_end(arglist);
-    if(status < 0) {
-        status = snprintf(szBuffer, cszBuffer, "%*s\n", (DWORD)(cszLineLength - 1), "");
-        if(status < 0) { status = 0; }
+    WCHAR wszBufferTiny[MAX_PATH];
+    LPWSTR wszBuffer;
+    if(cbBuffer == 0) { return 0; }
+    if(cbBuffer == 1) {
+        szBuffer[0] = '\0';
+        return 0;
     }
-    return (DWORD)status;
+    // 1: alloc/assign wchar buffer
+    if(cbBuffer < _countof(wszBufferTiny)) {
+        wszBuffer = wszBufferTiny;
+    } else {
+        wszBuffer = LocalAlloc(0, cbBuffer * sizeof(WCHAR));
+        if(!wszBuffer) {
+            szBuffer[0] = '\0';
+            goto fail;
+        }
+    }
+    // 2: write to whar buffer
+    va_start(arglist, wszFormat);
+    cch = _vsnwprintf_s(wszBuffer, cbBuffer, _TRUNCATE, wszFormat, arglist);
+    va_end(arglist);
+    if(cch < 0) { cch = (int)cbBuffer - 1; }
+    // 3: convert to utf-8
+    while((0 == WideCharToMultiByte(CP_UTF8, 0, wszBuffer, -1, szBuffer, (int)cbBuffer, NULL, NULL)) && cch) {
+        wszBuffer[--cch] = '\0';
+    }
+fail:
+    if(wszBuffer != wszBufferTiny) { LocalFree(wszBuffer); }
+    return strlen(szBuffer);
+}
+
+_Success_(return >= 0)
+DWORD Util_snwprintf_u8ln_impl(
+    _Out_writes_(cszLineLength+1) LPSTR szBuffer,
+    _In_ QWORD cszLineLength,
+    _In_z_ _Printf_format_string_ LPWSTR wszFormat,
+    _In_ va_list arglist
+)
+{
+    int cch, csz = 0;
+    WCHAR wszBufferTiny[MAX_PATH];
+    LPWSTR wszBuffer;
+    if(0 == cszLineLength) { 
+        szBuffer[0] = '\0';
+        return 0;
+    }
+    // 1: alloc/assign wchar buffer
+    if(cszLineLength < _countof(wszBufferTiny)) {
+        wszBuffer = wszBufferTiny;
+    } else {
+        wszBuffer = LocalAlloc(0, cszLineLength * sizeof(WCHAR));
+        if(!wszBuffer) { goto fail; }
+    }
+    // 2: write to whar buffer
+    cch = _vsnwprintf_s(wszBuffer, cszLineLength, _TRUNCATE, wszFormat, arglist);
+    if(cch < 0) { cch = (int)cszLineLength - 1; }
+    // 3: convert to utf-8
+    while((0 == (csz = WideCharToMultiByte(CP_UTF8, 0, wszBuffer, -1, szBuffer, (int)cszLineLength, NULL, NULL))) && cch) {
+        wszBuffer[--cch] = '\0';
+    }
+    csz--;
+fail:
+    if(csz < cszLineLength - 1) {
+        memset(szBuffer + csz, ' ', cszLineLength - 1 - csz);
+    }
+    szBuffer[cszLineLength - 1] = '\n';
+    szBuffer[cszLineLength] = '\0';
+    if(wszBuffer != wszBufferTiny) { LocalFree(wszBuffer); }
+    return (DWORD)cszLineLength;
+}
+
+_Success_(return >= 0)
+DWORD Util_snwprintf_u8ln(
+    _Out_writes_z_(cszLineLength + 1) LPSTR szBuffer,
+    _In_ QWORD cszLineLength,
+    _In_z_ _Printf_format_string_ LPWSTR wszFormat,
+    ...
+)
+{
+    DWORD ret;
+    va_list arglist;
+    va_start(arglist, wszFormat);
+    ret = Util_snwprintf_u8ln_impl(szBuffer, cszLineLength, wszFormat, arglist);
+    va_end(arglist);
+    return ret;
 }
 
 VOID Util_GetPathDll(_Out_writes_(MAX_PATH) PCHAR szPath, _In_opt_ HMODULE hModule)
@@ -322,7 +459,15 @@ VOID Util_GetPathDll(_Out_writes_(MAX_PATH) PCHAR szPath, _In_opt_ HMODULE hModu
 #define UTIL_NTSTATUS_SUCCESS                      ((NTSTATUS)0x00000000L)
 #define UTIL_NTSTATUS_END_OF_FILE                  ((NTSTATUS)0xC0000011L)
 
-NTSTATUS Util_VfsReadFile_FromPBYTE(_In_opt_ PBYTE pbFile, _In_ QWORD cbFile, _Out_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
+NTSTATUS Util_VfsReadFile_FromZERO(_In_ QWORD cbFile, _Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
+{
+    if(cbOffset > cbFile) { return UTIL_NTSTATUS_END_OF_FILE; }
+    *pcbRead = (DWORD)min(cb, cbFile - cbOffset);
+    ZeroMemory(pb, *pcbRead);
+    return *pcbRead ? UTIL_NTSTATUS_SUCCESS : UTIL_NTSTATUS_END_OF_FILE;
+}
+
+NTSTATUS Util_VfsReadFile_FromPBYTE(_In_opt_ PBYTE pbFile, _In_ QWORD cbFile, _Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
 {
     if(!pbFile || (cbOffset > cbFile)) { return UTIL_NTSTATUS_END_OF_FILE; }
     *pcbRead = (DWORD)min(cb, cbFile - cbOffset);
@@ -330,7 +475,67 @@ NTSTATUS Util_VfsReadFile_FromPBYTE(_In_opt_ PBYTE pbFile, _In_ QWORD cbFile, _O
     return *pcbRead ? UTIL_NTSTATUS_SUCCESS : UTIL_NTSTATUS_END_OF_FILE;
 }
 
-NTSTATUS Util_VfsReadFile_FromNumber(_In_ QWORD qwValue, _Out_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
+NTSTATUS Util_VfsReadFile_FromMEM(_In_opt_ PVMM_PROCESS pProcess, _In_ QWORD vaMEM, _In_ QWORD cbMEM, _In_ QWORD flags, _Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
+{
+    NTSTATUS nt = UTIL_NTSTATUS_END_OF_FILE;
+    PBYTE pbMEM;
+    if(cbOffset < cbMEM) {
+        vaMEM += cbOffset;
+        cbMEM -= cbOffset;
+        if((cbMEM < 0x04000000) && (pbMEM = LocalAlloc(0, cbMEM))) {
+            if(VmmRead2(pProcess, vaMEM, pbMEM, (DWORD)cbMEM, flags)) {
+                nt = Util_VfsReadFile_FromPBYTE(pbMEM, cbMEM, pb, cb, pcbRead, 0);
+            }
+            LocalFree(pbMEM);
+        }
+    }
+    return nt;
+}
+
+NTSTATUS Util_VfsReadFile_FromObData(_In_opt_ POB_DATA pData, _Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
+{
+    if(!pData) { return UTIL_NTSTATUS_END_OF_FILE; }
+    return Util_VfsReadFile_FromPBYTE(pData->pb, pData->ObHdr.cbData, pb, cb, pcbRead, cbOffset);
+}
+
+NTSTATUS Util_VfsReadFile_FromObDataStrA(_In_opt_ POB_DATA pData, _Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
+{
+    if(!pData) { return UTIL_NTSTATUS_END_OF_FILE; }
+    return Util_VfsReadFile_FromPBYTE(pData->pb, (pData->ObHdr.cbData ? pData->ObHdr.cbData - 1 : 0), pb, cb, pcbRead, cbOffset);
+}
+
+NTSTATUS Util_VfsReadFile_FromObCompressed(_In_opt_ POB_COMPRESSED pdc, _Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
+{
+    NTSTATUS nt = UTIL_NTSTATUS_END_OF_FILE;
+    POB_DATA pObData;
+    if((pObData = ObCompressed_GetData(pdc))) {
+        nt = Util_VfsReadFile_FromObData(pObData, pb, cb, pcbRead, cbOffset);
+        Ob_DECREF(pObData);
+    }
+    return nt;
+}
+
+NTSTATUS Util_VfsReadFile_FromObCompressedStrA(_In_opt_ POB_COMPRESSED pdc, _Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
+{
+    NTSTATUS nt = UTIL_NTSTATUS_END_OF_FILE;
+    POB_DATA pObData;
+    if((pObData = ObCompressed_GetData(pdc))) {
+        nt = Util_VfsReadFile_FromObDataStrA(pObData, pb, cb, pcbRead, cbOffset);
+        Ob_DECREF(pObData);
+    }
+    return nt;
+}
+
+NTSTATUS Util_VfsReadFile_FromTextWtoU8(_In_opt_ LPWSTR wszValue, _Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
+{
+    NTSTATUS nt;
+    LPSTR szTMP = Util_StrDupW2U8(wszValue);
+    nt = Util_VfsReadFile_FromPBYTE(szTMP, (szTMP ? strlen(szTMP) : 0), pb, cb, pcbRead, cbOffset);
+    LocalFree(szTMP);
+    return nt;
+}
+
+NTSTATUS Util_VfsReadFile_FromNumber(_In_ QWORD qwValue, _Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
 {
     BYTE pbBuffer[32];
     DWORD cbBuffer;
@@ -338,7 +543,7 @@ NTSTATUS Util_VfsReadFile_FromNumber(_In_ QWORD qwValue, _Out_ PBYTE pb, _In_ DW
     return Util_VfsReadFile_FromPBYTE(pbBuffer, cbBuffer, pb, cb, pcbRead, cbOffset);
 }
 
-NTSTATUS Util_VfsReadFile_FromQWORD(_In_ QWORD qwValue, _Out_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset, _In_ BOOL fPrefix)
+NTSTATUS Util_VfsReadFile_FromQWORD(_In_ QWORD qwValue, _Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset, _In_ BOOL fPrefix)
 {
     BYTE pbBuffer[32];
     DWORD cbBuffer;
@@ -346,7 +551,7 @@ NTSTATUS Util_VfsReadFile_FromQWORD(_In_ QWORD qwValue, _Out_ PBYTE pb, _In_ DWO
     return Util_VfsReadFile_FromPBYTE(pbBuffer, cbBuffer, pb, cb, pcbRead, cbOffset);
 }
 
-NTSTATUS Util_VfsReadFile_FromDWORD(_In_ DWORD dwValue, _Out_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset, _In_ BOOL fPrefix)
+NTSTATUS Util_VfsReadFile_FromDWORD(_In_ DWORD dwValue, _Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset, _In_ BOOL fPrefix)
 {
     BYTE pbBuffer[32];
     DWORD cbBuffer;
@@ -354,11 +559,36 @@ NTSTATUS Util_VfsReadFile_FromDWORD(_In_ DWORD dwValue, _Out_ PBYTE pb, _In_ DWO
     return Util_VfsReadFile_FromPBYTE(pbBuffer, cbBuffer, pb, cb, pcbRead, cbOffset);
 }
 
-NTSTATUS Util_VfsReadFile_FromBOOL(_In_ BOOL fValue, _Out_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
+NTSTATUS Util_VfsReadFile_FromBOOL(_In_ BOOL fValue, _Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
 {
     BYTE pbBuffer[1];
     pbBuffer[0] = fValue ? '1' : '0';
     return Util_VfsReadFile_FromPBYTE(pbBuffer, 1, pb, cb, pcbRead, cbOffset);
+}
+
+NTSTATUS Util_VfsReadFile_FromFILETIME(_In_ QWORD ftValue, _Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
+{
+    CHAR szTime[24];
+    Util_FileTime2String(ftValue, szTime);
+    szTime[23] = '\n';
+    return Util_VfsReadFile_FromPBYTE(szTime, 24, pb, cb, pcbRead, cbOffset);
+}
+
+NTSTATUS Util_VfsReadFile_snwprintf_u8ln(_Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset, _In_ QWORD cszLineLength, _In_z_ _Printf_format_string_ LPWSTR wszFormat, ...)
+{
+    NTSTATUS nt = UTIL_NTSTATUS_END_OF_FILE;
+    DWORD ret;
+    va_list arglist;
+    LPSTR szBuffer;
+    if(!(szBuffer = LocalAlloc(0, cszLineLength + 1))) { goto fail; }
+    va_start(arglist, wszFormat);
+    ret = Util_snwprintf_u8ln_impl(szBuffer, cszLineLength, wszFormat, arglist);
+    va_end(arglist);
+    if(!ret) { goto fail; }
+    nt = Util_VfsReadFile_FromPBYTE(szBuffer, cszLineLength, pb, cb, pcbRead, cbOffset);
+fail:
+    LocalFree(szBuffer);
+    return nt;
 }
 
 NTSTATUS Util_VfsWriteFile_PBYTE(_Inout_ PBYTE pbTarget, _In_ DWORD cbTarget, _In_reads_(cb) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset, _In_ BOOL fTerminatingNULL)
@@ -381,6 +611,7 @@ NTSTATUS Util_VfsWriteFile_PBYTE(_Inout_ PBYTE pbTarget, _In_ DWORD cbTarget, _I
 NTSTATUS Util_VfsWriteFile_BOOL(_Inout_ PBOOL pfTarget, _In_reads_(cb) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset)
 {
     CHAR ch;
+    if(cbOffset) { return UTIL_NTSTATUS_END_OF_FILE; }
     if((cb > 0) && (cbOffset == 0)) {
         ch = *(PCHAR)pb;
         *pfTarget = (ch == 0 || ch == '0') ? FALSE : TRUE;
@@ -389,10 +620,21 @@ NTSTATUS Util_VfsWriteFile_BOOL(_Inout_ PBOOL pfTarget, _In_reads_(cb) PBYTE pb,
     return UTIL_NTSTATUS_SUCCESS;
 }
 
-NTSTATUS Util_VfsWriteFile_DWORD(_Inout_ PDWORD pdwTarget, _In_reads_(cb) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset, _In_ DWORD dwMinAllow)
+NTSTATUS Util_VfsWriteFile_09(_Inout_ PDWORD pdwTarget, _In_reads_(cb) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset)
+{
+    if(cbOffset) { return UTIL_NTSTATUS_END_OF_FILE; }
+    if(cb && (pb[0] >= '0') && (pb[0] <= '9')) {
+        *pdwTarget = pb[0] - '0';
+    }
+    *pcbWrite = cb;
+    return UTIL_NTSTATUS_SUCCESS;
+}
+
+NTSTATUS Util_VfsWriteFile_DWORD(_Inout_ PDWORD pdwTarget, _In_reads_(cb) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset, _In_ DWORD dwMinAllow, _In_opt_ DWORD dwMaxAllow)
 {
     DWORD dw;
     BYTE pbBuffer[9];
+    if(cbOffset > 8) { return UTIL_NTSTATUS_END_OF_FILE; }
     if(cbOffset < 8) {
         snprintf(pbBuffer, 9, "%08x", *pdwTarget);
         cb = (DWORD)min(8 - cbOffset, cb);
@@ -400,6 +642,9 @@ NTSTATUS Util_VfsWriteFile_DWORD(_Inout_ PDWORD pdwTarget, _In_reads_(cb) PBYTE 
         pbBuffer[8] = 0;
         dw = strtoul(pbBuffer, NULL, 16);
         dw = max(dw, dwMinAllow);
+        if(dwMaxAllow) {
+            dw = min(dw, dwMaxAllow);
+        }
         *pdwTarget = dw;
     }
     *pcbWrite = cb;
@@ -443,31 +688,43 @@ LPWSTR Util_StrDupW(_In_opt_ LPWSTR wsz)
     return wszDup;
 }
 
-LPSTR Util_StrDupW2A(_In_opt_ LPWSTR wsz)
+LPSTR Util_StrDupW2U8(_In_opt_ LPWSTR wsz)
 {
-    DWORD cch;
-    LPSTR szDup;
+    DWORD cchUTF8;
+    LPSTR szUTF8;
     if(!wsz) { return NULL; }
-    cch = (DWORD)wcslen(wsz);
-    if(!(szDup = LocalAlloc(0, cch + 1ULL))) { return NULL; }
-    if(cch) {
-        WideCharToMultiByte(CP_ACP, 0, wsz, cch, szDup, cch, "_", NULL);
+    cchUTF8 = wcslen_u8(wsz);
+    if(!cchUTF8 || (cchUTF8 > 0x01000000) || !(szUTF8 = LocalAlloc(0, cchUTF8 + 1ULL))) {
+        return LocalAlloc(LMEM_ZEROINIT, 1);
     }
-    szDup[cch] = 0;
-    return szDup;
+    WideCharToMultiByte(CP_UTF8, 0, wsz, -1, szUTF8, cchUTF8, NULL, NULL);
+    szUTF8[cchUTF8] = 0;
+    return szUTF8;
 }
 
-VOID Util_FileTime2String(_In_ PFILETIME pFileTime, _Out_writes_(32) LPSTR szTime)
+BOOL Util_StrEndsWithW(_In_opt_ LPWSTR wsz, _In_opt_ LPWSTR wszEndsWith, _In_ BOOL fCaseInsensitive)
+{
+    SIZE_T cch, cchEndsWith;
+    if(!wsz || !wszEndsWith) { return FALSE; }
+    cch = wcslen(wsz);
+    cchEndsWith = wcslen(wszEndsWith);
+    if(cch < cchEndsWith) { return FALSE; }
+    return fCaseInsensitive ?
+        (0 == _wcsicmp(wsz + cch - cchEndsWith, wszEndsWith)) :
+        (0 == wcscmp(wsz + cch - cchEndsWith, wszEndsWith));
+}
+
+VOID Util_FileTime2String(_In_ QWORD ft, _Out_writes_(24) LPSTR szTime)
 {
     SYSTEMTIME SystemTime;
-    if(!*(PQWORD)pFileTime) {
-        strcpy_s(szTime, 32, "                    ***");
+    if(!ft || (ft > 0x0200000000000000)) {
+        strcpy_s(szTime, 24, "                    ***");
         return;
     }
-    FileTimeToSystemTime(pFileTime, &SystemTime);
+    FileTimeToSystemTime((PFILETIME)&ft, &SystemTime);
     sprintf_s(
         szTime,
-        32,
+        24,
         "%04i-%02i-%02i %02i:%02i:%02i UTC",
         SystemTime.wYear,
         SystemTime.wMonth,
@@ -476,6 +733,31 @@ VOID Util_FileTime2String(_In_ PFILETIME pFileTime, _Out_writes_(32) LPSTR szTim
         SystemTime.wMinute,
         SystemTime.wSecond
     );
+}
+
+VOID Util_GuidToString(_In_reads_(16) PBYTE pb, _Out_writes_(37) LPSTR szGUID)
+{
+    typedef struct tdGUID {
+        DWORD v1;
+        WORD  v2;
+        WORD  v3;
+        BYTE  v4[8];
+    } GUID, *PGUID;
+    PGUID g = (PGUID)pb;
+    _snprintf_s(szGUID, 37, _TRUNCATE,
+        "%08lX-%04hX-%04hX-%02hhX%02hhX-%02hhX%02hhX%02hhX%02hhX%02hhX%02hhX",
+        g->v1, g->v2, g->v3,
+        g->v4[0], g->v4[1], g->v4[2], g->v4[3], g->v4[4], g->v4[5], g->v4[6], g->v4[7]
+    );
+}
+
+int Util_qsort_DWORD(const void *pdw1, const void *pdw2)
+{
+    DWORD dw1 = *(PDWORD)pdw1;
+    DWORD dw2 = *(PDWORD)pdw2;
+    return
+        (dw1 < dw2) ? -1 :
+        (dw1 > dw2) ? 1 : 0;
 }
 
 int Util_qsort_QWORD(const void *pqw1, const void *pqw2)
@@ -496,7 +778,8 @@ int Util_qfind_CmpFindTableQWORD(_In_ PVOID pvFind, _In_ PVOID pvEntry)
     return 0;
 }
 
-PVOID Util_qfind(_In_ PVOID pvFind, _In_ DWORD cMap, _In_ PVOID pvMap, _In_ DWORD cbEntry, _In_ int(*pfnCmp)(_In_ PVOID pvFind, _In_ PVOID pvEntry))
+_Success_(return != NULL)
+PVOID Util_qfind_ex(_In_ PVOID pvFind, _In_ DWORD cMap, _In_ PVOID pvMap, _In_ DWORD cbEntry, _In_ int(*pfnCmp)(_In_ PVOID pvFind, _In_ PVOID pvEntry), _Out_opt_ PDWORD piMapOpt)
 {
     int f;
     DWORD i, cbSearch, cbStep, cbMap;
@@ -515,17 +798,113 @@ PVOID Util_qfind(_In_ PVOID pvFind, _In_ DWORD cMap, _In_ PVOID pvMap, _In_ DWOR
                 cbSearch += cbStep;
             }
         } else {
+            if(piMapOpt) { *piMapOpt = cbSearch / cbEntry; }
             return pbMap + cbSearch;
         }
         cbStep = cbStep >> 1;
     }
     if(cbSearch < cbMap) {
         if(!pfnCmp(pvFind, pbMap + cbSearch)) {
+            if(piMapOpt) { *piMapOpt = cbSearch / cbEntry; }
             return pbMap + cbSearch;
         }
         if((cbSearch >= cbEntry) && !pfnCmp(pvFind, pbMap + cbSearch - cbEntry)) {
+            if(piMapOpt) { *piMapOpt = (cbSearch - cbEntry) / cbEntry; }
             return pbMap + cbSearch - cbEntry;
         }
     }
     return NULL;
+}
+
+_Success_(return)
+BOOL Util_VfsHelper_GetIdDir(_In_ LPWSTR wszPath, _Out_ PDWORD pdwID, _Out_ LPWSTR *pwszSubPath)
+{
+    DWORD i = 0, iSubPath = 0;
+    // 1: Check if starting with PID/NAME/BY-ID/BY-NAME
+    if(!_wcsnicmp(wszPath, L"pid\\", 4)) {
+        i = 4;
+    } else if(!_wcsnicmp(wszPath, L"name\\", 5)) {
+        i = 5;
+    } else if(!_wcsnicmp(wszPath, L"by-id\\", 6)) {
+        i = 6;
+    } else if(!_wcsnicmp(wszPath, L"by-name\\", 8)) {
+        i = 8;
+    } else {
+        return FALSE;
+    }
+    // 3: Locate start of PID/ID number and 1st Path item (if any)
+    while((i < MAX_PATH) && wszPath[i] && (wszPath[i] != '\\')) { i++; }
+    iSubPath = ((i < MAX_PATH - 1) && (wszPath[i] == '\\')) ? (i + 1) : i;
+    i--;
+    while((wszPath[i] >= '0') && (wszPath[i] <= '9')) { i--; }
+    i++;
+    if(!((wszPath[i] >= '0') && (wszPath[i] <= '9'))) { return FALSE; }
+    *pdwID = wcstoul(wszPath + i, NULL, 10);
+    *pwszSubPath = wszPath + iSubPath;
+    return TRUE;
+}
+
+#define UTIL_VFSLINEFIXED_LINEPAD512 \
+    L"-----------------------------------------------------" \
+    L"-----------------------------------------------------" \
+    L"-----------------------------------------------------" \
+    L"-----------------------------------------------------"
+
+/*
+* FixedLineRead: Read from a file dynamically created from a map/array object
+* using a callback function to populate individual lines (excluding header).
+* -- pfnCallback = callback function to populate individual lines.
+* -- ctx = optional context to 'pfn' callback function.
+* -- cbLineLength = line length, including newline, excluding null terminator.
+* -- wszHeader = optional header line.
+* -- pMap = an array of entries (usually 'pMap' in a map).
+* -- cMap = number of pMap entries.
+* -- cbEntry = byte length of each entry.
+* -- pb
+* -- cb
+* -- pcbRead
+* -- cbOffset
+* -- return
+*/
+NTSTATUS Util_VfsLineFixed_Read(
+    _In_ UTIL_VFSLINEFIXED_PFN_CALLBACK pfnCallback,
+    _Inout_opt_ PVOID ctx,
+    _In_ DWORD cbLineLength,
+    _In_opt_ LPWSTR wszHeader,
+    _In_ PVOID pMap,
+    _In_ DWORD cMap,
+    _In_ DWORD cbEntry,
+    _Out_writes_to_(cb, *pcbRead) PBYTE pb,
+    _In_ DWORD cb,
+    _Out_ PDWORD pcbRead,
+    _In_ QWORD cbOffset
+) {
+    LPSTR sz;
+    NTSTATUS nt;
+    PVOID pvMapEntry;
+    QWORD i, iMapEntry, o = 0, cbMax, cStart, cEnd, cHeader;
+    cHeader = (wszHeader && ctxMain->cfg.fFileInfoHeader) ? 2 : 0;
+    cStart = (DWORD)(cbOffset / cbLineLength);
+    cEnd = (DWORD)min(cHeader + cMap - 1, (cb + cbOffset + cbLineLength - 1) / cbLineLength);
+    cbMax = 1 + (1 + cEnd - cStart) * cbLineLength;
+    if(!cHeader && !cMap) { return VMMDLL_STATUS_END_OF_FILE; }
+    if((cStart > cHeader + cMap)) { return VMMDLL_STATUS_END_OF_FILE; }
+    if(!(sz = LocalAlloc(LMEM_ZEROINIT, cbMax))) { return VMMDLL_STATUS_FILE_INVALID; }
+    for(i = cStart; i <= cEnd; i++) {
+        // header:
+        if(i < cHeader) {
+            o += i ?
+                Util_snwprintf_u8ln(sz + o, cbLineLength, L"%.*s", (DWORD)wcslen(wszHeader), UTIL_VFSLINEFIXED_LINEPAD512) :
+                Util_snwprintf_u8ln(sz + o, cbLineLength, L"%s", wszHeader);
+            continue;
+        }
+        // line:
+        iMapEntry = i - cHeader;
+        pvMapEntry = (PBYTE)pMap + (i - cHeader) * cbEntry;
+        pfnCallback(ctx, cbLineLength, (DWORD)iMapEntry, pvMapEntry, sz + o);
+        o += cbLineLength;
+    }
+    nt = Util_VfsReadFile_FromPBYTE(sz, cbMax - 1, pb, cb, pcbRead, cbOffset - cStart * cbLineLength);
+    LocalFree(sz);
+    return nt;
 }

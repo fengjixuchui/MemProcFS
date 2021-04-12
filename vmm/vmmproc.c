@@ -1,6 +1,6 @@
-// vfsproc.c : implementation of functions related to operating system and process parsing of virtual memory.
+// vmmproc.c : implementation of functions related to operating system and process parsing of virtual memory.
 //
-// (c) Ulf Frisk, 2018-2020
+// (c) Ulf Frisk, 2018-2021
 // Author: Ulf Frisk, pcileech@frizk.net
 //
 
@@ -8,8 +8,10 @@
 #include "vmmproc.h"
 #include "vmmwin.h"
 #include "vmmwininit.h"
+#include "vmmnet.h"
 #include "vmmwinobj.h"
 #include "vmmwinreg.h"
+#include "vmmwinsvc.h"
 #include "mm_pfn.h"
 #include "pluginmanager.h"
 #include "statistics.h"
@@ -63,7 +65,7 @@ BOOL VmmProc_RefreshProcesses(_In_ BOOL fRefreshTotal)
             vmmprintf_fn("FAIL - SYSTEM PROCESS NOT FOUND - SHOULD NOT HAPPEN\n");
             return FALSE;
         }
-        result = VmmWin_EnumerateEPROCESS(pObProcessSystem, fRefreshTotal);
+        result = VmmWinProcess_Enumerate(pObProcessSystem, fRefreshTotal, NULL);
         Ob_DECREF(pObProcessSystem);
     }
     return TRUE;
@@ -73,94 +75,150 @@ BOOL VmmProc_RefreshProcesses(_In_ BOOL fRefreshTotal)
 // may be changed in config options or by editing files in the .status directory.
 
 #define VMMPROC_UPDATERTHREAD_LOCAL_PERIOD              100
-#define VMMPROC_UPDATERTHREAD_LOCAL_PHYSCACHE           (500 / VMMPROC_UPDATERTHREAD_LOCAL_PERIOD)                // 0.5s
-#define VMMPROC_UPDATERTHREAD_LOCAL_TLB                 (5 * 1000 / VMMPROC_UPDATERTHREAD_LOCAL_PERIOD)           // 5s
+#define VMMPROC_UPDATERTHREAD_LOCAL_MEM                 (300 / VMMPROC_UPDATERTHREAD_LOCAL_PERIOD)                // 0.3s
+#define VMMPROC_UPDATERTHREAD_LOCAL_TLB                 (2 * 1000 / VMMPROC_UPDATERTHREAD_LOCAL_PERIOD)           // 2s
 #define VMMPROC_UPDATERTHREAD_LOCAL_PROC_REFRESHLIST    (5 * 1000 / VMMPROC_UPDATERTHREAD_LOCAL_PERIOD)           // 5s
 #define VMMPROC_UPDATERTHREAD_LOCAL_PROC_REFRESHTOTAL   (15 * 1000 / VMMPROC_UPDATERTHREAD_LOCAL_PERIOD)          // 15s
 #define VMMPROC_UPDATERTHREAD_LOCAL_REGISTRY            (5 * 60 * 1000 / VMMPROC_UPDATERTHREAD_LOCAL_PERIOD)      // 5m
 
 #define VMMPROC_UPDATERTHREAD_REMOTE_PERIOD             100
-#define VMMPROC_UPDATERTHREAD_REMOTE_PHYSCACHE          (15 * 1000 / VMMPROC_UPDATERTHREAD_REMOTE_PERIOD)        // 15s
-#define VMMPROC_UPDATERTHREAD_REMOTE_TLB                (3 * 60 * 1000 / VMMPROC_UPDATERTHREAD_REMOTE_PERIOD)    // 3m
+#define VMMPROC_UPDATERTHREAD_REMOTE_MEM                (5 * 1000 / VMMPROC_UPDATERTHREAD_REMOTE_PERIOD)         // 5s
+#define VMMPROC_UPDATERTHREAD_REMOTE_TLB                (2 * 60 * 1000 / VMMPROC_UPDATERTHREAD_REMOTE_PERIOD)    // 2m
 #define VMMPROC_UPDATERTHREAD_REMOTE_PROC_REFRESHLIST   (15 * 1000 / VMMPROC_UPDATERTHREAD_REMOTE_PERIOD)        // 15s
 #define VMMPROC_UPDATERTHREAD_REMOTE_PROC_REFRESHTOTAL  (3 * 60 * 1000 / VMMPROC_UPDATERTHREAD_REMOTE_PERIOD)    // 3m
 #define VMMPROC_UPDATERTHREAD_REMOTE_REGISTRY           (10 * 60 * 1000 / VMMPROC_UPDATERTHREAD_LOCAL_PERIOD)    // 10m
 
+/*
+* Refresh functions refreshes aspects of MemProcFS at different intervals.
+* Frequency from frequent to less frequent is as:
+* 1. VmmProcRefresh_MEM()    = refresh memory cache (except page tables).
+* 2. VmmProcRefresh_TLB()    = refresh page table cache.
+* 3. VmmProcRefresh_Fast()   = fast refresh incl. partial process refresh.
+* 4. VmmProcRefresh_Medium() = medium refresh incl. full process refresh.
+* 5. VmmProcRefresh_Slow()   = slow refresh.
+* A slower more comprehensive refresh layer does not equal that the lower
+* faster refresh layers are run automatically - user has to refresh them too.
+*/
+_Success_(return)
+BOOL VmmProcRefresh_MEM()
+{
+    EnterCriticalSection(&ctxVmm->LockMaster);
+    ctxVmm->tcRefreshMEM++;
+    VmmCacheClearPartial(VMM_CACHE_TAG_PHYS);
+    InterlockedIncrement64(&ctxVmm->stat.cPhysRefreshCache);
+    VmmCacheClearPartial(VMM_CACHE_TAG_PAGING);
+    InterlockedIncrement64(&ctxVmm->stat.cPageRefreshCache);
+    ObSet_Clear(ctxVmm->Cache.PAGING_FAILED);
+    LeaveCriticalSection(&ctxVmm->LockMaster);
+    return TRUE;
+}
+
+_Success_(return)
+BOOL VmmProcRefresh_TLB()
+{
+    EnterCriticalSection(&ctxVmm->LockMaster);
+    ctxVmm->tcRefreshTLB++;
+    VmmCacheClearPartial(VMM_CACHE_TAG_TLB);
+    InterlockedIncrement64(&ctxVmm->stat.cTlbRefreshCache);
+    LeaveCriticalSection(&ctxVmm->LockMaster);
+    return TRUE;
+}
+
+_Success_(return)
+BOOL VmmProcRefresh_Fast()
+{
+    EnterCriticalSection(&ctxVmm->LockMaster);
+    ctxVmm->tcRefreshFast++;
+    if(!VmmProc_RefreshProcesses(FALSE)) {
+        LeaveCriticalSection(&ctxVmm->LockMaster);
+        vmmprintf("VmmProc: Failed to refresh MemProcFS - aborting.\n");
+        return FALSE;
+    }
+    PluginManager_Notify(VMMDLL_PLUGIN_NOTIFY_REFRESH_FAST, NULL, 0);
+    LeaveCriticalSection(&ctxVmm->LockMaster);
+    return TRUE;
+}
+
+_Success_(return)
+BOOL VmmProcRefresh_Medium()
+{
+    EnterCriticalSection(&ctxVmm->LockMaster);
+    ctxVmm->tcRefreshMedium++;
+    if(!VmmProc_RefreshProcesses(TRUE)) {
+        LeaveCriticalSection(&ctxVmm->LockMaster);
+        vmmprintf("VmmProc: Failed to refresh MemProcFS - aborting.\n");
+        return FALSE;
+    }
+    VmmNet_Refresh();
+    VmmWinObj_Refresh();
+    MmPfn_Refresh();
+    PluginManager_Notify(VMMDLL_PLUGIN_NOTIFY_REFRESH_MEDIUM, NULL, 0);
+    LeaveCriticalSection(&ctxVmm->LockMaster);
+    return TRUE;
+}
+
+_Success_(return)
+BOOL VmmProcRefresh_Slow()
+{
+    EnterCriticalSection(&ctxVmm->LockMaster);
+    ctxVmm->tcRefreshSlow++;
+    VmmWinReg_Refresh();
+    VmmWinUser_Refresh();
+    VmmWinSvc_Refresh();
+    VmmWinPhysMemMap_Refresh();
+    PluginManager_Notify(VMMDLL_PLUGIN_NOTIFY_REFRESH_SLOW, NULL, 0);
+    LeaveCriticalSection(&ctxVmm->LockMaster);
+    return TRUE;
+}
+
 DWORD VmmProcCacheUpdaterThread()
 {
-    QWORD i = 0, paMax;
-    BOOL fPHYS, fTLB, fProcPartial, fProcTotal, fRegistry;
+    QWORD i = 0;
+    BOOL fRefreshMEM, fRefreshTLB, fRefreshFast, fRefreshMedium, fRefreshSlow;
     vmmprintfv("VmmProc: Start periodic cache flushing.\n");
     if(ctxMain->dev.fRemote) {
         ctxVmm->ThreadProcCache.cMs_TickPeriod = VMMPROC_UPDATERTHREAD_REMOTE_PERIOD;
-        ctxVmm->ThreadProcCache.cTick_Phys = VMMPROC_UPDATERTHREAD_REMOTE_PHYSCACHE;
+        ctxVmm->ThreadProcCache.cTick_MEM = VMMPROC_UPDATERTHREAD_REMOTE_MEM;
         ctxVmm->ThreadProcCache.cTick_TLB = VMMPROC_UPDATERTHREAD_REMOTE_TLB;
-        ctxVmm->ThreadProcCache.cTick_ProcPartial = VMMPROC_UPDATERTHREAD_REMOTE_PROC_REFRESHLIST;
-        ctxVmm->ThreadProcCache.cTick_ProcTotal = VMMPROC_UPDATERTHREAD_REMOTE_PROC_REFRESHTOTAL;
-        ctxVmm->ThreadProcCache.cTick_Registry = VMMPROC_UPDATERTHREAD_REMOTE_REGISTRY;
+        ctxVmm->ThreadProcCache.cTick_Fast = VMMPROC_UPDATERTHREAD_REMOTE_PROC_REFRESHLIST;
+        ctxVmm->ThreadProcCache.cTick_Medium = VMMPROC_UPDATERTHREAD_REMOTE_PROC_REFRESHTOTAL;
+        ctxVmm->ThreadProcCache.cTick_Slow = VMMPROC_UPDATERTHREAD_REMOTE_REGISTRY;
     } else {
         ctxVmm->ThreadProcCache.cMs_TickPeriod = VMMPROC_UPDATERTHREAD_LOCAL_PERIOD;
-        ctxVmm->ThreadProcCache.cTick_Phys = VMMPROC_UPDATERTHREAD_LOCAL_PHYSCACHE;
+        ctxVmm->ThreadProcCache.cTick_MEM = VMMPROC_UPDATERTHREAD_LOCAL_MEM;
         ctxVmm->ThreadProcCache.cTick_TLB = VMMPROC_UPDATERTHREAD_LOCAL_TLB;
-        ctxVmm->ThreadProcCache.cTick_ProcPartial = VMMPROC_UPDATERTHREAD_LOCAL_PROC_REFRESHLIST;
-        ctxVmm->ThreadProcCache.cTick_ProcTotal = VMMPROC_UPDATERTHREAD_LOCAL_PROC_REFRESHTOTAL;
-        ctxVmm->ThreadProcCache.cTick_Registry = VMMPROC_UPDATERTHREAD_LOCAL_REGISTRY;
+        ctxVmm->ThreadProcCache.cTick_Fast = VMMPROC_UPDATERTHREAD_LOCAL_PROC_REFRESHLIST;
+        ctxVmm->ThreadProcCache.cTick_Medium = VMMPROC_UPDATERTHREAD_LOCAL_PROC_REFRESHTOTAL;
+        ctxVmm->ThreadProcCache.cTick_Slow = VMMPROC_UPDATERTHREAD_LOCAL_REGISTRY;
     }
-    while(ctxVmm->ThreadProcCache.fEnabled) {
+    while(ctxVmm->Work.fEnabled && ctxVmm->ThreadProcCache.fEnabled) {
         Sleep(ctxVmm->ThreadProcCache.cMs_TickPeriod);
         i++;
-        fTLB = !(i % ctxVmm->ThreadProcCache.cTick_TLB);
-        fPHYS = !(i % ctxVmm->ThreadProcCache.cTick_Phys);
-        fProcTotal = !(i % ctxVmm->ThreadProcCache.cTick_ProcTotal);
-        fProcPartial = !(i % ctxVmm->ThreadProcCache.cTick_ProcPartial) && !fProcTotal;
-        fRegistry = !(i % ctxVmm->ThreadProcCache.cTick_Registry);
-        EnterCriticalSection(&ctxVmm->MasterLock);
+        fRefreshTLB = !(i % ctxVmm->ThreadProcCache.cTick_TLB);
+        fRefreshMEM = !(i % ctxVmm->ThreadProcCache.cTick_MEM);
+        fRefreshSlow = !(i % ctxVmm->ThreadProcCache.cTick_Slow);
+        fRefreshMedium = !(i % ctxVmm->ThreadProcCache.cTick_Medium);
+        fRefreshFast = !(i % ctxVmm->ThreadProcCache.cTick_Fast) && !fRefreshMedium;
         // PHYS / TLB cache clear
-        if(fPHYS) {
-            VmmCacheClear(VMM_CACHE_TAG_PHYS);
-            InterlockedIncrement64(&ctxVmm->stat.cPhysRefreshCache);
-            VmmCacheClear(VMM_CACHE_TAG_PAGING);
-            InterlockedIncrement64(&ctxVmm->stat.cPageRefreshCache);
-            ObSet_Clear(ctxVmm->Cache.PAGING_FAILED);
+        EnterCriticalSection(&ctxVmm->LockMaster);
+        if(fRefreshMEM) {
+            VmmProcRefresh_MEM();
         }
-        if(fTLB) {
-            VmmCacheClear(VMM_CACHE_TAG_TLB);
-            InterlockedIncrement64(&ctxVmm->stat.cTlbRefreshCache);
+        if(fRefreshTLB) {
+            VmmProcRefresh_TLB();
         }
-        // refresh proc list
-        if(fProcPartial || fProcTotal) {
-            if(!VmmProc_RefreshProcesses(fProcTotal)) {
-                vmmprintf("VmmProc: Failed to refresh memory process file system - aborting.\n");
-                LeaveCriticalSection(&ctxVmm->MasterLock);
-                goto fail;
-            }
-            // update max physical address (if volatile).
-            if(ctxMain->dev.fVolatileMaxAddress) {
-                if(LeechCore_GetOption(LEECHCORE_OPT_MEMORYINFO_ADDR_MAX, &paMax) && (paMax > 0x01000000)) {
-                    ctxMain->dev.paMax = paMax;
-                }
-            }
-            // send notify
-            if(fProcTotal) {
-                VmmWinObj_Refresh();
-                PluginManager_Notify(VMMDLL_PLUGIN_EVENT_REFRESH_PROCESS_TOTAL, NULL, 0);
-            }
-            // refresh pfn subsystem
-            MmPfn_Refresh();
+        if(fRefreshFast) {
+            VmmProcRefresh_Fast();      // incl. partial process refresh
         }
-        // refresh registry and user map
-        if(fRegistry) {
-            VmmWinReg_Refresh();
-            VmmWinUser_Refresh();
-            VmmWinPhysMemMap_Refresh();
-            PluginManager_Notify(VMMDLL_PLUGIN_EVENT_REFRESH_REGISTRY, NULL, 0);
+        if(fRefreshMedium) {
+            VmmProcRefresh_Medium();    // incl. full process refresh
         }
-        LeaveCriticalSection(&ctxVmm->MasterLock);
+        if(fRefreshSlow) {
+            VmmProcRefresh_Slow();
+        }
+        LeaveCriticalSection(&ctxVmm->LockMaster);
     }
-fail:
     vmmprintfv("VmmProc: Exit periodic cache flushing.\n");
-    if(ctxVmm->ThreadProcCache.hThread) { CloseHandle(ctxVmm->ThreadProcCache.hThread); }
-    ctxVmm->ThreadProcCache.hThread = NULL;
     return 0;
 }
 
@@ -178,18 +236,14 @@ BOOL VmmProcInitialize()
                 "         Specify PageDirectoryBase (DTB/CR3) in -cr3 option if value if known.  \n");
         }
     }
-    // set up cache maintenance in the form of a separate worker thread in case
-    // the backend is a volatile device (FPGA). If the underlying device isn't
-    // volatile then there is no need to update! NB! Files are not considered
-    // to be volatile.
+    // set up cache maintenance in the form of a separate eternally running
+    // worker thread in case the backend is a volatile device (FPGA).
+    // If the underlying device isn't volatile then there is no need to update!
+    // NB! Files are not considered to be volatile.
     if(result && ctxMain->dev.fVolatile && !ctxMain->cfg.fDisableBackgroundRefresh) {
         ctxVmm->ThreadProcCache.fEnabled = TRUE;
-        ctxVmm->ThreadProcCache.hThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)VmmProcCacheUpdaterThread, ctxVmm, 0, NULL);
-        if(!ctxVmm->ThreadProcCache.hThread) { ctxVmm->ThreadProcCache.fEnabled = FALSE; }
+        VmmWork((LPTHREAD_START_ROUTINE)VmmProcCacheUpdaterThread, NULL, 0);
     }
-    // allow worker threads for various functions in other parts of the code
-    // NB! this only allows worker threads - it does not create them!
-    ctxVmm->ThreadWorkers.fEnabled = TRUE;
     return result;
 }
 

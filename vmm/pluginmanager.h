@@ -1,6 +1,6 @@
-// pluginmanager.h : definitions for the plugin manager for memory process file system plugins.
+// pluginmanager.h : definitions for the plugin manager for MemProcFS plugins.
 //
-// (c) Ulf Frisk, 2018-2020
+// (c) Ulf Frisk, 2018-2021
 // Author: Ulf Frisk, pcileech@frizk.net
 //
 #ifndef __PLUGINMANAGER_H__
@@ -22,6 +22,15 @@ BOOL PluginManager_Initialize();
 VOID PluginManager_Close();
 
 /*
+* Set/Change the visibility of an already registered plugin. Depending on other
+* plugins registered in the path parent paths may change as well.
+* -- fRoot = TRUE: root, FALSE: process.
+* -- wszPluginPath
+* -- fVisible
+*/
+VOID PluginManager_SetVisibility(_In_ BOOL fRoot, _In_ LPWSTR wszPluginPath, _In_ BOOL fVisible);
+
+/*
 * Send a List command down the module chain to the appropriate module.
 * -- pProcess
 * -- wszPath
@@ -40,7 +49,7 @@ VOID PluginManager_List(_In_opt_ PVMM_PROCESS pProcess, _In_ LPWSTR wszPath, _In
 * -- cbOffset
 * -- return
 */
-NTSTATUS PluginManager_Read(_In_opt_ PVMM_PROCESS pProcess, _In_ LPWSTR wszPath, _Out_writes_(cb) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset);
+NTSTATUS PluginManager_Read(_In_opt_ PVMM_PROCESS pProcess, _In_ LPWSTR wszPath, _Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset);
 
 /*
 * Send a Write command down the module chain to the appropriate module.
@@ -63,5 +72,45 @@ NTSTATUS PluginManager_Write(_In_opt_ PVMM_PROCESS pProcess, _In_ LPWSTR wszPath
 * -- return = (always return TRUE).
 */
 BOOL PluginManager_Notify(_In_ DWORD fEvent, _In_opt_ PVOID pvEvent, _In_opt_ DWORD cbEvent);
+
+/*
+* Initialize plugins with forensic mode capabilities.
+*/
+VOID PluginManager_FcInitialize();
+
+/*
+* Finalize plugins with forensic mode capabilities.
+*/
+VOID PluginManager_FcFinalize();
+
+/*
+* Ingest physical memory into plugins with forensic mode capabilities.
+* NB! must only be called in single-threaded context!
+* -- pIngestPhysmem
+*/
+VOID PluginManager_FcIngestPhysmem(_In_ PVMMDLL_PLUGIN_FORENSIC_INGEST_PHYSMEM pIngestPhysmem);
+
+/*
+* All ingestion actions are completed.
+*/
+VOID PluginManager_FcIngestFinalize();
+
+/*
+* Register plugins with timelining capabilities with the timeline manager
+* and call into each plugin to allow them to add their timelining entries.
+* NB! This function is meant to be called by the core forensic subsystem only.
+* -- pfnRegister = callback function to register timeline module.
+* -- pfnClose = function to close the timeline handle.
+* -- pfnEntryAdd = callback function to call to add a timelining entry.
+* -- pfnEntryAddBySql = callback function to call to add timelining data by
+*      insert by partial sql select sub-query - data selected should be:
+*      id_str, ft, ac, pid, data64 (in order and without SELECT statement).
+*/
+VOID PluginManager_FcTimeline(
+    _In_ HANDLE(*pfnRegister)(_In_reads_(6) LPSTR sNameShort, _In_reads_(32) LPSTR szFileUTF8, _In_reads_(32) LPSTR szFileJSON),
+    _In_ VOID(*pfnClose)(_In_ HANDLE hTimeline),
+    _In_ VOID(*pfnEntryAdd)(_In_ HANDLE hTimeline, _In_ QWORD ft, _In_ DWORD dwAction, _In_ DWORD dwPID, _In_ QWORD qwValue, _In_ LPWSTR wszText),
+    _In_ VOID(*pfnEntryAddBySql)(_In_ HANDLE hTimeline, _In_ DWORD cEntrySql, _In_ LPSTR *pszEntrySql)
+);
 
 #endif /* __PLUGINMANAGER_H__ */

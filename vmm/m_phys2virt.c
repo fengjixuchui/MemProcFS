@@ -1,6 +1,6 @@
 // m_phys2virt.c : implementation of the phys2virt built-in module.
 //
-// (c) Ulf Frisk, 2019-2020
+// (c) Ulf Frisk, 2019-2021
 // Author: Ulf Frisk, pcileech@frizk.net
 //
 #include "pluginmanager.h"
@@ -62,7 +62,7 @@ BOOL Phys2Virt_GetUpdateAll(_Out_opt_ PM_PHYS2VIRT_MULTIENTRY_CONTEXT *ppMultiEn
     if(!ctx) { return FALSE; }
     ctx->pa = ctxVmm->paPluginPhys2VirtRoot;
     ctx->cMax = (DWORD)cPIDs * 4;
-    VmmProcessActionForeachParallel(ctx, 5, VmmProcessActionForeachParallel_CriteriaActiveOnly, Phys2Virt_GetUpdateAll_CallbackAction);
+    VmmProcessActionForeachParallel(ctx, VmmProcessActionForeachParallel_CriteriaActiveOnly, Phys2Virt_GetUpdateAll_CallbackAction);
     ctx->c = min(ctx->c, ctx->cMax - 1);
     if(pcMultiEntry) { *pcMultiEntry = ctx->c; }
     if(ppMultiEntry) {
@@ -157,29 +157,29 @@ NTSTATUS Phys2Virt_ReadVirtProcess(_In_ PVMM_PROCESS pProcess, _Out_ PBYTE pb, _
 * -- cbOffset
 * -- return
 */
-NTSTATUS Phys2Virt_Read(_In_ PVMMDLL_PLUGIN_CONTEXT ctx, _Out_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
+NTSTATUS Phys2Virt_Read(_In_ PVMMDLL_PLUGIN_CONTEXT ctx, _Out_writes_to_(cb, *pcbRead) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbRead, _In_ QWORD cbOffset)
 {
     NTSTATUS nt;
     PVMMOB_PHYS2VIRT_INFORMATION pObPhys2Virt = NULL;
     PVMM_PROCESS pProcess = (PVMM_PROCESS)ctx->pProcess;
-    if(!_wcsicmp(ctx->wszPath, L"readme")) {
+    if(!_wcsicmp(ctx->wszPath, L"readme.txt")) {
         return Util_VfsReadFile_FromPBYTE((PBYTE)szMPHYS2VIRT_README, strlen(szMPHYS2VIRT_README), pb, cb, pcbRead, cbOffset);
     }
     if(pProcess) {
-        if(!_wcsicmp(ctx->wszPath, L"phys")) {
+        if(!_wcsicmp(ctx->wszPath, L"phys.txt")) {
             pObPhys2Virt = VmmPhys2VirtGetInformation(pProcess, 0);
             nt = Util_VfsReadFile_FromQWORD((pObPhys2Virt ? pObPhys2Virt->paTarget : 0), pb, cb, pcbRead, cbOffset, FALSE);
             Ob_DECREF_NULL(&pObPhys2Virt);
             return nt;
         }
-        if(!_wcsicmp(ctx->wszPath, L"virt")) {
+        if(!_wcsicmp(ctx->wszPath, L"virt.txt")) {
             return Phys2Virt_ReadVirtProcess(pProcess, pb, cb, pcbRead, cbOffset);
         }
     } else {
-        if(!_wcsicmp(ctx->wszPath, L"phys")) {
+        if(!_wcsicmp(ctx->wszPath, L"phys.txt")) {
             return Util_VfsReadFile_FromQWORD(ctxVmm->paPluginPhys2VirtRoot, pb, cb, pcbRead, cbOffset, FALSE);
         }
-        if(!_wcsicmp(ctx->wszPath, L"virt")) {
+        if(!_wcsicmp(ctx->wszPath, L"virt.txt")) {
             return Phys2Virt_ReadVirtRoot(pb, cb, pcbRead, cbOffset);
         }
     }
@@ -196,12 +196,12 @@ NTSTATUS Phys2Virt_Read(_In_ PVMMDLL_PLUGIN_CONTEXT ctx, _Out_ PBYTE pb, _In_ DW
 * -- cbOffset
 * -- return
 */
-NTSTATUS Phys2Virt_Write(_In_ PVMMDLL_PLUGIN_CONTEXT ctx, _In_ PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset)
+NTSTATUS Phys2Virt_Write(_In_ PVMMDLL_PLUGIN_CONTEXT ctx, _In_reads_(cb) PBYTE pb, _In_ DWORD cb, _Out_ PDWORD pcbWrite, _In_ QWORD cbOffset)
 {
     BYTE pbBuffer[17];
     PVMM_PROCESS pProcess = (PVMM_PROCESS)ctx->pProcess;
     *pcbWrite = 0;
-    if(!_wcsicmp(ctx->wszPath, L"phys")) {
+    if(!_wcsicmp(ctx->wszPath, L"phys.txt")) {
         if(cbOffset < 16) {
             *pcbWrite = cb;
             memcpy(pbBuffer, "0000000000000000", 16);
@@ -244,9 +244,9 @@ BOOL Phys2Virt_List(_In_ PVMMDLL_PLUGIN_CONTEXT ctx, _Inout_ PHANDLE pFileList)
         Phys2Virt_GetUpdateAll(NULL, &c);
         cb = c * (8 + (ctxVmm->f32 ? 8 : 16));
     }
-    VMMDLL_VfsList_AddFile(pFileList, L"readme", strlen(szMPHYS2VIRT_README), NULL);
-    VMMDLL_VfsList_AddFile(pFileList, L"phys", 16, NULL);
-    VMMDLL_VfsList_AddFile(pFileList, L"virt", cb, NULL);
+    VMMDLL_VfsList_AddFile(pFileList, L"readme.txt", strlen(szMPHYS2VIRT_README), NULL);
+    VMMDLL_VfsList_AddFile(pFileList, L"phys.txt", 16, NULL);
+    VMMDLL_VfsList_AddFile(pFileList, L"virt.txt", cb, NULL);
     return TRUE;
 }
 
@@ -256,17 +256,23 @@ BOOL Phys2Virt_List(_In_ PVMMDLL_PLUGIN_CONTEXT ctx, _Inout_ PHANDLE pFileList)
 * shall call the supplied pfnPluginManager_Register function.
 * NB! the module does not have to register itself - for example if the target
 * operating system or architecture is unsupported.
-* -- pPluginRegInfo
+* -- pRI
 */
 VOID M_Phys2Virt_Initialize(_Inout_ PVMMDLL_PLUGIN_REGINFO pRI)
 {
     if((pRI->magic != VMMDLL_PLUGIN_REGINFO_MAGIC) || (pRI->wVersion != VMMDLL_PLUGIN_REGINFO_VERSION)) { return; }
     if(!((pRI->tpMemoryModel == VMM_MEMORYMODEL_X64) || (pRI->tpMemoryModel == VMM_MEMORYMODEL_X86) || (pRI->tpMemoryModel == VMM_MEMORYMODEL_X86PAE))) { return; }
-    wcscpy_s(pRI->reg_info.wszPathName, 128, L"\\phys2virt");            // module name
-    pRI->reg_info.fRootModule = TRUE;                                    // module shows in root directory
-    pRI->reg_info.fProcessModule = TRUE;                                 // module shows in process directory
     pRI->reg_fn.pfnList = Phys2Virt_List;                                // List function supported
     pRI->reg_fn.pfnRead = Phys2Virt_Read;                                // Read function supported
     pRI->reg_fn.pfnWrite = Phys2Virt_Write;                              // Write function supported
+    // register process plugin
+    wcscpy_s(pRI->reg_info.wszPathName, 128, L"\\phys2virt");
+    pRI->reg_info.fRootModule = FALSE;
+    pRI->reg_info.fProcessModule = TRUE;
+    pRI->pfnPluginManager_Register(pRI);
+    // register root plugin
+    wcscpy_s(pRI->reg_info.wszPathName, 128, L"\\misc\\phys2virt");
+    pRI->reg_info.fRootModule = TRUE;
+    pRI->reg_info.fProcessModule = FALSE;
     pRI->pfnPluginManager_Register(pRI);
 }
